@@ -1,0 +1,28 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: paybridge-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: paybridge-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: paybridge-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: paybridge-redis
+    plan: free
+    ipAllowList: [] # only reachable from services in this Render account
+
+databases:
+  - name: paybridge-db
+    plan: free
