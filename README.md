@@ -1,5 +1,7 @@
 # PayBridge
 
+[![CI](https://github.com/iochieng1/paybridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iochieng1/paybridge/actions/workflows/ci.yml)
+
 **An M-Pesa payments gateway API that is rate-limited, idempotent, and can't double-credit a payment.**
 
 > 🚧 Work in progress. Day 1 of 10: scaffold, database schema, health checks, CI.
