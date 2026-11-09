@@ -11,6 +11,8 @@ const envSchema = z.object({
     .default("info"),
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
+  // HS256 signing key for access tokens. 32+ characters so it can't be brute-forced.
+  JWT_SECRET: z.string().min(32),
 });
 
 export type Config = z.infer<typeof envSchema>;

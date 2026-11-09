@@ -17,6 +17,8 @@ services:
           type: keyvalue
           name: paybridge-redis
           property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
 
   - type: keyvalue
     name: paybridge-redis
