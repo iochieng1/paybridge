@@ -20,7 +20,8 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] PostgreSQL schema and migrations for merchants, tokens, API keys, payments, audit log, idempotency and webhooks
 - [x] `/health` endpoint that checks Postgres and Redis
 - [x] CI: lint, format, typecheck, migration drift check, integration tests on real Postgres/Redis, secret scanning
-- [ ] JWT auth with refresh-token rotation and reuse detection
+- [x] Merchant registration and login (argon2id passwords, 15-minute access JWT)
+- [ ] Refresh-token rotation and reuse detection
 - [ ] Redis sliding-window rate limiter (atomic Lua script)
 - [ ] API keys and OpenAPI/Swagger docs
 - [ ] STK push payments with `Idempotency-Key` support
@@ -75,6 +76,10 @@ Decisions and the reasons for them. This section grows as features land.
 - **Amounts as integers.** Daraja accepts only whole shillings, so there is no floating-point money anywhere.
 - **Tests run against real Postgres and Redis (Testcontainers), not mocks.** The guarantees this service makes come from database constraints, row locks and Redis Lua scripts. Mocks would test none of them.
 - **Migrations run on start-up.** On a single-instance free-tier deploy, this guarantees the schema matches the code. With multiple instances it would move to a separate release step.
+- **argon2id for passwords.** It is memory-hard, which makes GPU cracking expensive. Parameters follow OWASP (19 MiB, 2 iterations, 1 lane).
+- **Login doesn't reveal which emails exist.** A wrong email and a wrong password get the same `401` and message. For an unknown email, login still runs a full argon2 verification against a dummy hash, so response times match too.
+- **Short-lived stateless access tokens.** Access JWTs (HS256) last 15 minutes and aren't stored, so verifying one needs no database lookup for the token itself. Revocation comes from refresh-token rotation (Day 3).
+- **Email uniqueness is enforced by the database.** `merchants_email_lower_idx` is a unique index on `lower(email)`. Registration relies on it instead of checking first, so two concurrent sign-ups can't both succeed.
 - **Fastify over Express.** It has schema-based validation and serialisation built in, and OpenAPI generation comes from the same schemas.
 
 ## Deployment
