@@ -13,6 +13,13 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
   // HS256 signing key for access tokens. 32+ characters so it can't be brute-forced.
   JWT_SECRET: z.string().min(32),
+  // Trust X-Forwarded-For for the client IP. Only enable behind a proxy that
+  // sets it (e.g. Render); otherwise clients could spoof their IP and dodge
+  // per-IP rate limits.
+  TRUST_PROXY: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
 
 export type Config = z.infer<typeof envSchema>;
