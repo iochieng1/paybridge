@@ -8,6 +8,9 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Render's proxy sets X-Forwarded-For; per-IP rate limits need the real client IP.
+      - key: TRUST_PROXY
+        value: "true"
       - key: DATABASE_URL
         fromDatabase:
           name: paybridge-db

@@ -13,6 +13,7 @@ import {
   rotateRefreshToken,
 } from "../auth/refresh-tokens.js";
 import { merchants } from "../db/schema.js";
+import { loginLimit } from "../rate-limit/limits.js";
 
 export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 
@@ -102,6 +103,7 @@ const authRoutes: FastifyPluginAsync = async (app) => {
   app.post<{ Body: LoginBody }>(
     "/login",
     {
+      preHandler: app.rateLimit(loginLimit),
       schema: {
         body: {
           type: "object",

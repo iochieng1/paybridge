@@ -15,11 +15,21 @@ describe("loadConfig", () => {
       PORT: 3000,
       HOST: "0.0.0.0",
       LOG_LEVEL: "info",
+      TRUST_PROXY: false,
     });
   });
 
   it("coerces PORT to a number", () => {
     expect(loadConfig({ ...validEnv, PORT: "8080" }).PORT).toBe(8080);
+  });
+
+  it.each([
+    ["true", true],
+    ["false", false],
+  ])("parses TRUST_PROXY=%s", (value, expected) => {
+    expect(loadConfig({ ...validEnv, TRUST_PROXY: value }).TRUST_PROXY).toBe(
+      expected,
+    );
   });
 
   it("fails fast and lists every missing variable", () => {

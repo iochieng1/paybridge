@@ -5,6 +5,8 @@ import { Redis } from "ioredis";
 import { authenticate } from "./auth/authenticate.js";
 import type { Config } from "./config.js";
 import { createDb, type Database } from "./db/client.js";
+import { globalLimit } from "./rate-limit/limits.js";
+import { createRateLimit } from "./rate-limit/rate-limit.js";
 import authRoutes, { ACCESS_TOKEN_TTL_SECONDS } from "./routes/auth.js";
 import healthRoutes from "./routes/health.js";
 import merchantRoutes from "./routes/merchants.js";
@@ -17,8 +19,17 @@ declare module "fastify" {
   }
 }
 
-export const buildApp = async (config: Config) => {
+export type BuildAppOptions = {
+  /** Namespace for rate-limit keys in Redis; tests use a unique one per app. */
+  rateLimitPrefix?: string;
+};
+
+export const buildApp = async (
+  config: Config,
+  { rateLimitPrefix = "ratelimit" }: BuildAppOptions = {},
+) => {
   const app = Fastify({
+    trustProxy: config.TRUST_PROXY,
     logger: {
       level: config.LOG_LEVEL,
       transport:
@@ -35,6 +46,9 @@ export const buildApp = async (config: Config) => {
   app.decorate("config", config);
   app.decorate("db", db);
   app.decorate("redis", redis);
+
+  app.decorate("rateLimit", createRateLimit(redis, rateLimitPrefix));
+  app.addHook("onRequest", app.rateLimit(globalLimit));
 
   app.addHook("onClose", async () => {
     await Promise.allSettled([sql.end(), redis.quit()]);

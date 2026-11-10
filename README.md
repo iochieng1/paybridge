@@ -22,7 +22,7 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] CI: lint, format, typecheck, migration drift check, integration tests on real Postgres/Redis, secret scanning
 - [x] Merchant registration and login (argon2id passwords, 15-minute access JWT)
 - [x] Refresh-token rotation and reuse detection
-- [ ] Redis sliding-window rate limiter (atomic Lua script)
+- [x] Redis sliding-window rate limiter (atomic Lua script)
 - [ ] API keys and OpenAPI/Swagger docs
 - [ ] STK push payments with `Idempotency-Key` support
 - [ ] Callback handling with deduplication and a forward-only state machine
@@ -63,6 +63,7 @@ src/
     schema.ts       # Drizzle schema (source of truth)
     client.ts       # Postgres connection
     migrate.ts      # Migration runner
+  rate-limit/       # Sliding-window limiter (Lua) and the configured limits
   routes/           # HTTP routes
 drizzle/            # Generated SQL migrations (committed)
 test/               # Vitest + Testcontainers integration tests
@@ -84,6 +85,12 @@ Decisions and the reasons for them. This section grows as features land.
 - **No grace period for concurrent refreshes.** Two requests with the same token are serialised by a per-family Postgres advisory lock. The first one rotates; the second looks like reuse and revokes the family. A buggy client that refreshes twice in parallel gets logged out, but an attacker can't slip in during a grace window. The lock also makes sure a revocation can't miss a token that is being inserted at the same moment.
 - **Refresh tokens are random and stored as SHA-256 hashes.** They carry 256 bits of entropy, so a fast hash is enough (argon2 is for low-entropy passwords). A database leak doesn't give anyone usable tokens.
 - **Email uniqueness is enforced by the database.** `merchants_email_lower_idx` is a unique index on `lower(email)`. Registration relies on it instead of checking first, so two concurrent sign-ups can't both succeed.
+- **Rate limiting uses a sliding-window log in Redis.** Each key is a sorted set of request timestamps. One Lua script removes entries older than the window, counts the rest and adds the new request only if it fits, so the check is atomic and concurrent requests can't overshoot. Limits: login 5/min per IP + email, payments 60/min per API key, everything 300/min per IP. Responses carry `RateLimit-Limit` and `RateLimit-Remaining`, plus `Retry-After` on `429`.
+  - _Fixed window_ (one counter per minute) is cheaper, but a client can send the full limit at 0:59 and again at 1:00: twice the limit in two seconds.
+  - _Sliding-window counter_ (weighting the previous window's count) is O(1) memory, but it's an estimate that assumes requests were spread evenly, so it can let a burst through or block a client too early.
+  - _Sliding-window log_ is exact. It stores one entry per request, but the limits here are small (at most 300 per key), so memory is bounded and cheap. Rejected requests aren't recorded, so a client that keeps retrying still gets back in once old entries age out.
+- **Fail-open for payments, fail-closed for login.** If Redis is down, the payments limiter lets requests through, because an outage shouldn't stop merchants taking money, and idempotency keys still stop duplicate charges. The login limiter returns `503`, because without it passwords could be guessed at full speed. Both log a warning.
+- **`TRUST_PROXY` is off by default.** Per-IP limits need the real client IP. Behind Render's proxy that comes from `X-Forwarded-For`, so `render.yaml` turns it on. Anywhere else, trusting that header would let clients choose their own IP and dodge the limits.
 - **Fastify over Express.** It has schema-based validation and serialisation built in, and OpenAPI generation comes from the same schemas.
 
 ## Deployment
