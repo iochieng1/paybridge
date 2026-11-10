@@ -1,11 +1,17 @@
 import { sql } from "drizzle-orm";
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 
 import {
   hashPassword,
   verifyAgainstDummyHash,
   verifyPassword,
 } from "../auth/password.js";
+import {
+  issueRefreshToken,
+  REFRESH_TOKEN_TTL_SECONDS,
+  revokeRefreshTokenFamily,
+  rotateRefreshToken,
+} from "../auth/refresh-tokens.js";
 import { merchants } from "../db/schema.js";
 
 export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
@@ -14,6 +20,16 @@ const email = { type: "string", format: "email", maxLength: 254 } as const;
 
 type RegisterBody = { email: string; password: string; name: string };
 type LoginBody = { email: string; password: string };
+type RefreshBody = { refresh_token: string };
+
+const refreshBodySchema = {
+  type: "object",
+  required: ["refresh_token"],
+  additionalProperties: false,
+  properties: {
+    refresh_token: { type: "string", minLength: 1, maxLength: 128 },
+  },
+} as const;
 
 const isUniqueViolation = (err: unknown): boolean => {
   if (typeof err !== "object" || err === null) return false;
@@ -120,15 +136,61 @@ const authRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const accessToken = await reply.jwtSign({ sub: merchant.id });
+      const refreshToken = await issueRefreshToken(app.db, merchant.id);
+      return reply.send(await tokenPair(reply, merchant.id, refreshToken));
+    },
+  );
 
-      return reply.send({
-        access_token: accessToken,
-        token_type: "Bearer",
-        expires_in: ACCESS_TOKEN_TTL_SECONDS,
-      });
+  app.post<{ Body: RefreshBody }>(
+    "/refresh",
+    { schema: { body: refreshBodySchema } },
+    async (request, reply) => {
+      const result = await rotateRefreshToken(
+        app.db,
+        request.body.refresh_token,
+      );
+
+      if (!result.ok) {
+        if (result.reason === "reused") {
+          request.log.warn(
+            "Refresh token reuse detected; token family revoked",
+          );
+        }
+        // One response for every failure, so callers learn nothing about why.
+        return reply.code(401).send({
+          statusCode: 401,
+          error: "Unauthorized",
+          message: "Invalid refresh token",
+        });
+      }
+
+      return reply.send(
+        await tokenPair(reply, result.merchantId, result.refreshToken),
+      );
+    },
+  );
+
+  app.post<{ Body: RefreshBody }>(
+    "/logout",
+    { schema: { body: refreshBodySchema } },
+    async (request, reply) => {
+      await revokeRefreshTokenFamily(app.db, request.body.refresh_token);
+      // 204 even for unknown tokens: logout is idempotent and not an oracle.
+      return reply.code(204).send();
     },
   );
 };
+
+const tokenPair = async (
+  reply: FastifyReply,
+  merchantId: string,
+  refreshToken: string,
+) => ({
+  access_token: await reply.jwtSign({ sub: merchantId }),
+  token_type: "Bearer",
+  expires_in: ACCESS_TOKEN_TTL_SECONDS,
+  refresh_token: refreshToken,
+  refresh_expires_in: REFRESH_TOKEN_TTL_SECONDS,
+});
 
 export default authRoutes;

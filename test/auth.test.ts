@@ -4,7 +4,8 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { buildApp } from "../src/app.js";
-import { merchants } from "../src/db/schema.js";
+import { hashRefreshToken } from "../src/auth/refresh-tokens.js";
+import { merchants, refreshTokens } from "../src/db/schema.js";
 import { buildTestApp } from "./helpers.js";
 
 type App = Awaited<ReturnType<typeof buildApp>>;
@@ -39,6 +40,34 @@ describe("merchant auth", () => {
       url: "/v1/merchants/me",
       headers: authorization ? { authorization } : {},
     });
+
+  const refresh = (refreshToken: string) =>
+    app.inject({
+      method: "POST",
+      url: "/v1/auth/refresh",
+      payload: { refresh_token: refreshToken },
+    });
+
+  const logout = (refreshToken: string) =>
+    app.inject({
+      method: "POST",
+      url: "/v1/auth/logout",
+      payload: { refresh_token: refreshToken },
+    });
+
+  const tokenRow = async (refreshToken: string) => {
+    const [row] = await app.db
+      .select()
+      .from(refreshTokens)
+      .where(eq(refreshTokens.tokenHash, hashRefreshToken(refreshToken)));
+    return row!;
+  };
+
+  const familyRows = (familyId: string) =>
+    app.db
+      .select()
+      .from(refreshTokens)
+      .where(eq(refreshTokens.familyId, familyId));
 
   const registerMerchant = async () => {
     const email = uniqueEmail();
@@ -138,6 +167,35 @@ describe("merchant auth", () => {
       expect(claims!.exp - claims!.iat).toBe(900);
     });
 
+    it("returns a 7-day refresh token stored only as a SHA-256 hash", async () => {
+      const { email, id } = await registerMerchant();
+
+      const body = (await login(email, PASSWORD)).json();
+
+      expect(body.refresh_token).toEqual(expect.any(String));
+      expect(body.refresh_expires_in).toBe(7 * 24 * 60 * 60);
+      const row = await tokenRow(body.refresh_token);
+      expect(row.merchantId).toBe(id);
+      expect(row.tokenHash).not.toBe(body.refresh_token);
+      expect(row.usedAt).toBeNull();
+      expect(row.revokedAt).toBeNull();
+      const ttlMs = row.expiresAt.getTime() - row.createdAt.getTime();
+      expect(ttlMs).toBe(7 * 24 * 60 * 60 * 1000);
+    });
+
+    it("starts a new token family on every login", async () => {
+      const { email } = await registerMerchant();
+
+      const first = (await login(email, PASSWORD)).json();
+      const second = (await login(email, PASSWORD)).json();
+
+      const [a, b] = await Promise.all([
+        tokenRow(first.refresh_token),
+        tokenRow(second.refresh_token),
+      ]);
+      expect(a.familyId).not.toBe(b.familyId);
+    });
+
     it("returns the same 401 for a wrong password and an unknown email", async () => {
       const { email } = await registerMerchant();
 
@@ -212,6 +270,145 @@ describe("merchant auth", () => {
       const res = await me(`Bearer ${token}`);
 
       expect(res.statusCode).toBe(401);
+    });
+  });
+
+  describe("POST /v1/auth/refresh", () => {
+    const loginFresh = async () => {
+      const { email, id } = await registerMerchant();
+      const body = (await login(email, PASSWORD)).json();
+      return { id, refreshToken: body.refresh_token as string };
+    };
+
+    it("rotates the token within the same family", async () => {
+      const { id, refreshToken } = await loginFresh();
+
+      const res = await refresh(refreshToken);
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body).toMatchObject({
+        token_type: "Bearer",
+        expires_in: 900,
+        refresh_expires_in: 7 * 24 * 60 * 60,
+      });
+      expect(body.refresh_token).not.toBe(refreshToken);
+      expect(app.jwt.decode<{ sub: string }>(body.access_token)?.sub).toBe(id);
+
+      const [old, next] = await Promise.all([
+        tokenRow(refreshToken),
+        tokenRow(body.refresh_token),
+      ]);
+      expect(old.usedAt).not.toBeNull();
+      expect(next.familyId).toBe(old.familyId);
+      expect(next.usedAt).toBeNull();
+
+      expect((await me(`Bearer ${body.access_token}`)).statusCode).toBe(200);
+    });
+
+    it("can be chained: each new token works once", async () => {
+      const { refreshToken } = await loginFresh();
+
+      const second = (await refresh(refreshToken)).json().refresh_token;
+      const third = await refresh(second);
+
+      expect(third.statusCode).toBe(200);
+    });
+
+    it("revokes the whole family, including the newest token, on reuse", async () => {
+      const { refreshToken } = await loginFresh();
+      const second = (await refresh(refreshToken)).json().refresh_token;
+      const third = (await refresh(second)).json().refresh_token;
+
+      const reuse = await refresh(refreshToken);
+
+      expect(reuse.statusCode).toBe(401);
+      const { familyId } = await tokenRow(refreshToken);
+      const rows = await familyRows(familyId);
+      expect(rows).toHaveLength(3);
+      expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
+      expect((await refresh(third)).statusCode).toBe(401);
+    });
+
+    it("issues exactly one new pair for concurrent refreshes of one token", async () => {
+      const { refreshToken } = await loginFresh();
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => refresh(refreshToken)),
+      );
+
+      const codes = results.map((r) => r.statusCode).sort();
+      expect(codes).toEqual([200, 401, 401, 401, 401]);
+      const { familyId } = await tokenRow(refreshToken);
+      expect(await familyRows(familyId)).toHaveLength(2);
+    });
+
+    it("returns 401 for an expired token without revoking the family", async () => {
+      const { refreshToken } = await loginFresh();
+      await app.db
+        .update(refreshTokens)
+        .set({ expiresAt: new Date(Date.now() - 1000) })
+        .where(eq(refreshTokens.tokenHash, hashRefreshToken(refreshToken)));
+
+      const res = await refresh(refreshToken);
+
+      expect(res.statusCode).toBe(401);
+      expect((await tokenRow(refreshToken)).revokedAt).toBeNull();
+    });
+
+    it("returns the same 401 for unknown, expired, revoked and reused tokens", async () => {
+      const unknown = await refresh("not-a-real-token");
+      const { refreshToken } = await loginFresh();
+      await refresh(refreshToken);
+      const reused = await refresh(refreshToken);
+      const revoked = await refresh(refreshToken);
+
+      expect(unknown.statusCode).toBe(401);
+      expect(reused.json()).toEqual(unknown.json());
+      expect(revoked.json()).toEqual(unknown.json());
+      expect(unknown.json().message).toBe("Invalid refresh token");
+    });
+
+    it("rejects a missing refresh_token with 400", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/auth/refresh",
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+  });
+
+  describe("POST /v1/auth/logout", () => {
+    it("revokes the family so its tokens can no longer refresh", async () => {
+      const { email } = await registerMerchant();
+      const first = (await login(email, PASSWORD)).json().refresh_token;
+      const current = (await refresh(first)).json().refresh_token;
+
+      const res = await logout(current);
+
+      expect(res.statusCode).toBe(204);
+      expect((await refresh(current)).statusCode).toBe(401);
+      const { familyId } = await tokenRow(current);
+      const rows = await familyRows(familyId);
+      expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
+    });
+
+    it("leaves other sessions of the same merchant alive", async () => {
+      const { email } = await registerMerchant();
+      const phone = (await login(email, PASSWORD)).json().refresh_token;
+      const laptop = (await login(email, PASSWORD)).json().refresh_token;
+
+      await logout(phone);
+
+      expect((await refresh(laptop)).statusCode).toBe(200);
+    });
+
+    it("returns 204 for an unknown token", async () => {
+      const res = await logout("not-a-real-token");
+
+      expect(res.statusCode).toBe(204);
     });
   });
 });
