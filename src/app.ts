@@ -1,12 +1,20 @@
 import fastifyJwt from "@fastify/jwt";
 import Fastify from "fastify";
+import {
+  serializerCompiler,
+  validatorCompiler,
+  type ZodTypeProvider,
+} from "fastify-type-provider-zod";
 import { Redis } from "ioredis";
 
+import { apiKeyAuth } from "./auth/api-keys.js";
 import { authenticate } from "./auth/authenticate.js";
 import type { Config } from "./config.js";
 import { createDb, type Database } from "./db/client.js";
+import { registerOpenApi } from "./openapi.js";
 import { globalLimit } from "./rate-limit/limits.js";
 import { createRateLimit } from "./rate-limit/rate-limit.js";
+import apiKeyRoutes from "./routes/api-keys.js";
 import authRoutes, { ACCESS_TOKEN_TTL_SECONDS } from "./routes/auth.js";
 import healthRoutes from "./routes/health.js";
 import merchantRoutes from "./routes/merchants.js";
@@ -22,11 +30,13 @@ declare module "fastify" {
 export type BuildAppOptions = {
   /** Namespace for rate-limit keys in Redis; tests use a unique one per app. */
   rateLimitPrefix?: string;
+  /** Where logs go instead of stdout; tests use it to inspect log output. */
+  logStream?: NodeJS.WritableStream;
 };
 
 export const buildApp = async (
   config: Config,
-  { rateLimitPrefix = "ratelimit" }: BuildAppOptions = {},
+  { rateLimitPrefix = "ratelimit", logStream }: BuildAppOptions = {},
 ) => {
   const app = Fastify({
     trustProxy: config.TRUST_PROXY,
@@ -37,8 +47,12 @@ export const buildApp = async (
           ? { target: "pino-pretty" }
           : undefined,
       redact: ["req.headers.authorization", "req.headers['x-api-key']"],
+      ...(logStream && { stream: logStream }),
     },
-  });
+  }).withTypeProvider<ZodTypeProvider>();
+
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
 
   const { db, sql } = createDb(config.DATABASE_URL);
   const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 2 });
@@ -62,10 +76,15 @@ export const buildApp = async (
   });
   app.decorateRequest("merchant");
   app.decorate("authenticate", authenticate);
+  app.decorateRequest("apiKeyId", "");
+  app.decorate("apiKeyAuth", apiKeyAuth);
+
+  await registerOpenApi(app);
 
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: "/v1/auth" });
   await app.register(merchantRoutes, { prefix: "/v1/merchants" });
+  await app.register(apiKeyRoutes, { prefix: "/v1/api-keys" });
 
   return app;
 };

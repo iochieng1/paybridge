@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { inject } from "vitest";
 
-import { buildApp } from "../src/app.js";
+import { buildApp, type BuildAppOptions } from "../src/app.js";
 import { type Config, loadConfig } from "../src/config.js";
 
 export const testConfig = (overrides: Partial<Config> = {}): Config => ({
@@ -17,7 +17,11 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
 });
 
 // Test files share one Redis, so each app gets its own rate-limit namespace.
-export const buildTestApp = (overrides: Partial<Config> = {}) =>
+export const buildTestApp = (
+  overrides: Partial<Config> = {},
+  options: BuildAppOptions = {},
+) =>
   buildApp(testConfig(overrides), {
     rateLimitPrefix: `ratelimit:test:${randomUUID()}`,
+    ...options,
   });

@@ -8,7 +8,7 @@
 >
 > <!-- TODO: demo GIF here once payments work (day 10) -->
 >
-> **Live API:** _coming soon_ · **Docs:** `/docs` (Swagger UI, day 5)
+> **Live API:** _coming soon_ · **Docs:** `/docs` (Swagger UI) · `/openapi.json`
 
 PayBridge lets any app accept M-Pesa payments through one clean REST API. It deals with the messy parts of Safaricom's Daraja API: STK push timeouts, duplicate callbacks, unsigned webhooks and token expiry. You don't have to.
 
@@ -23,7 +23,7 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] Merchant registration and login (argon2id passwords, 15-minute access JWT)
 - [x] Refresh-token rotation and reuse detection
 - [x] Redis sliding-window rate limiter (atomic Lua script)
-- [ ] API keys and OpenAPI/Swagger docs
+- [x] API keys and OpenAPI/Swagger docs
 - [ ] STK push payments with `Idempotency-Key` support
 - [ ] Callback handling with deduplication and a forward-only state machine
 - [ ] Reconciliation job for lost callbacks (STK Push Query)
@@ -39,6 +39,28 @@ cp .env.example .env
 docker compose up -d     # Postgres + Redis
 npm run db:migrate
 npm run dev              # http://localhost:3000/health
+```
+
+Then open http://localhost:3000/docs for the interactive API reference.
+
+## Authentication
+
+There are two kinds of credentials:
+
+| Who                | Credential                                                       | Used for                                |
+| ------------------ | ---------------------------------------------------------------- | --------------------------------------- |
+| A merchant (human) | Access token from `POST /v1/auth/login` (15 min) + refresh token | Dashboard routes such as `/v1/api-keys` |
+| A merchant server  | API key `pb_test_<prefix>_<secret>` from `POST /v1/api-keys`     | Payment routes                          |
+
+Both are sent as `Authorization: Bearer <token>`.
+
+```bash
+# Create an API key (the full key is shown once; store it somewhere safe)
+curl -X POST http://localhost:3000/v1/api-keys -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# List keys (prefixes only) and revoke one
+curl http://localhost:3000/v1/api-keys -H "Authorization: Bearer $ACCESS_TOKEN"
+curl -X DELETE http://localhost:3000/v1/api-keys/$KEY_ID -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
 ## Scripts
@@ -63,8 +85,10 @@ src/
     schema.ts       # Drizzle schema (source of truth)
     client.ts       # Postgres connection
     migrate.ts      # Migration runner
+  openapi.ts        # OpenAPI document (/openapi.json) and Swagger UI (/docs)
+  auth/             # Passwords, access/refresh tokens, API keys
   rate-limit/       # Sliding-window limiter (Lua) and the configured limits
-  routes/           # HTTP routes
+  routes/           # HTTP routes with zod request/response schemas
 drizzle/            # Generated SQL migrations (committed)
 test/               # Vitest + Testcontainers integration tests
 ```
@@ -91,7 +115,11 @@ Decisions and the reasons for them. This section grows as features land.
   - _Sliding-window log_ is exact. It stores one entry per request, but the limits here are small (at most 300 per key), so memory is bounded and cheap. Rejected requests aren't recorded, so a client that keeps retrying still gets back in once old entries age out.
 - **Fail-open for payments, fail-closed for login.** If Redis is down, the payments limiter lets requests through, because an outage shouldn't stop merchants taking money, and idempotency keys still stop duplicate charges. The login limiter returns `503`, because without it passwords could be guessed at full speed. Both log a warning.
 - **`TRUST_PROXY` is off by default.** Per-IP limits need the real client IP. Behind Render's proxy that comes from `X-Forwarded-For`, so `render.yaml` turns it on. Anywhere else, trusting that header would let clients choose their own IP and dodge the limits.
+- **API keys are shown once and stored as a prefix plus a hash.** A key is `pb_test_<prefix>_<secret>`. The 12-hex-character prefix is stored in plaintext so the key can be found with one indexed lookup and shown in `GET /v1/api-keys`. The secret is 256 random bits and only its SHA-256 hash is stored (compared in constant time), so neither a database leak nor the logs (the `Authorization` header is redacted) give anyone a working key. Like refresh tokens, the secret is high-entropy, so a fast hash is enough.
+- **Unknown, revoked and wrong-secret API keys get the same `401`.** Revoking sets `revoked_at` and takes effect on the next request; there is no cache to wait out. Every successful request updates `last_used_at`, so merchants can spot keys that are unused and safe to revoke.
+- **Separate credentials for people and servers.** Access tokens (short-lived, from a password login) manage the account, including creating keys. API keys (long-lived, revocable, one per server) take payments. A leaked API key can't create more keys or change the account, and access tokens aren't accepted on payment routes or vice versa.
 - **Fastify over Express.** It has schema-based validation and serialisation built in, and OpenAPI generation comes from the same schemas.
+- **zod schemas are the single source of truth for each route.** The same schema validates the request, types the handler, filters the response (unknown fields are never serialised, so a column like `key_hash` can't leak by accident) and generates the OpenAPI document served at `/openapi.json` and `/docs`. Every route documents its request, its responses and an example payload, and a test fails if one doesn't or if the document stops being valid OpenAPI 3.1.
 
 ## Deployment
 
