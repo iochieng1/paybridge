@@ -22,6 +22,20 @@ services:
           property: connectionString
       - key: JWT_SECRET
         generateValue: true
+      # Daraja credentials: set these in the Render dashboard, never in git.
+      - key: MPESA_CONSUMER_KEY
+        sync: false
+      - key: MPESA_CONSUMER_SECRET
+        sync: false
+      - key: MPESA_PASSKEY
+        sync: false
+      - key: MPESA_SHORTCODE
+        value: "174379"
+      - key: MPESA_ENV
+        value: sandbox
+      # The service's public URL, e.g. https://paybridge-api.onrender.com
+      - key: PUBLIC_BASE_URL
+        sync: false
 
   - type: keyvalue
     name: paybridge-redis

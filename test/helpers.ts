@@ -12,6 +12,10 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
     DATABASE_URL: inject("databaseUrl"),
     REDIS_URL: inject("redisUrl"),
     JWT_SECRET: "test-jwt-secret-that-is-at-least-32-chars",
+    MPESA_CONSUMER_KEY: "test-consumer-key",
+    MPESA_CONSUMER_SECRET: "test-consumer-secret",
+    MPESA_PASSKEY: "test-passkey",
+    PUBLIC_BASE_URL: "https://paybridge.example.com",
   }),
   ...overrides,
 });

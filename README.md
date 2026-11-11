@@ -24,6 +24,7 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] Refresh-token rotation and reuse detection
 - [x] Redis sliding-window rate limiter (atomic Lua script)
 - [x] API keys and OpenAPI/Swagger docs
+- [x] Typed Daraja client: OAuth token cached in Redis, STK push, STK Push Query
 - [ ] STK push payments with `Idempotency-Key` support
 - [ ] Callback handling with deduplication and a forward-only state machine
 - [ ] Reconciliation job for lost callbacks (STK Push Query)
@@ -72,6 +73,7 @@ curl -X DELETE http://localhost:3000/v1/api-keys/$KEY_ID -H "Authorization: Bear
 | `npm run lint` / `npm run typecheck` | Static checks                                                  |
 | `npm run db:generate`                | Generate a SQL migration after editing `src/db/schema.ts`      |
 | `npm run db:migrate`                 | Apply migrations to `DATABASE_URL`                             |
+| `npm run mpesa:smoke -- <phone>`     | Manual Daraja sandbox smoke test (see below)                   |
 | `npm run build && npm start`         | Production build; `start` applies migrations, then boots       |
 
 ## Project structure
@@ -87,6 +89,7 @@ src/
     migrate.ts      # Migration runner
   openapi.ts        # OpenAPI document (/openapi.json) and Swagger UI (/docs)
   auth/             # Passwords, access/refresh tokens, API keys
+  mpesa/            # Daraja client (OAuth, STK push, STK query), phone normalisation
   rate-limit/       # Sliding-window limiter (Lua) and the configured limits
   routes/           # HTTP routes with zod request/response schemas
 drizzle/            # Generated SQL migrations (committed)
@@ -118,8 +121,43 @@ Decisions and the reasons for them. This section grows as features land.
 - **API keys are shown once and stored as a prefix plus a hash.** A key is `pb_test_<prefix>_<secret>`. The 12-hex-character prefix is stored in plaintext so the key can be found with one indexed lookup and shown in `GET /v1/api-keys`. The secret is 256 random bits and only its SHA-256 hash is stored (compared in constant time), so neither a database leak nor the logs (the `Authorization` header is redacted) give anyone a working key. Like refresh tokens, the secret is high-entropy, so a fast hash is enough.
 - **Unknown, revoked and wrong-secret API keys get the same `401`.** Revoking sets `revoked_at` and takes effect on the next request; there is no cache to wait out. Every successful request updates `last_used_at`, so merchants can spot keys that are unused and safe to revoke.
 - **Separate credentials for people and servers.** Access tokens (short-lived, from a password login) manage the account, including creating keys. API keys (long-lived, revocable, one per server) take payments. A leaked API key can't create more keys or change the account, and access tokens aren't accepted on payment routes or vice versa.
+- **The Daraja OAuth token lives in Redis, not in process memory.** Every instance shares one token, so a deploy or restart doesn't fetch a new one, and Daraja's token endpoint isn't hit once per process. It is refreshed a minute early so a request never goes out with a token that expires in flight. The cache key holds a hash of the consumer key, never the key itself.
+- **Daraja calls aren't retried, apart from one retry after a rejected token.** Retrying an STK push after a timeout could prompt the customer twice. Whether a push went through is answered later by the callback or STK Push Query, not by guessing.
 - **Fastify over Express.** It has schema-based validation and serialisation built in, and OpenAPI generation comes from the same schemas.
 - **zod schemas are the single source of truth for each route.** The same schema validates the request, types the handler, filters the response (unknown fields are never serialised, so a column like `key_hash` can't leak by accident) and generates the OpenAPI document served at `/openapi.json` and `/docs`. Every route documents its request, its responses and an example payload, and a test fails if one doesn't or if the document stops being valid OpenAPI 3.1.
+
+## M-Pesa (Daraja)
+
+`src/mpesa/daraja.ts` is a typed client for Safaricom's Daraja API. It is configured only through environment variables (see `.env.example`):
+
+| Variable                                       | Notes                                                                   |
+| ---------------------------------------------- | ----------------------------------------------------------------------- |
+| `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` | From your app on the [Daraja portal](https://developer.safaricom.co.ke) |
+| `MPESA_SHORTCODE`                              | Paybill/till number; the shared sandbox one is `174379` (default)       |
+| `MPESA_PASSKEY`                                | Lipa na M-Pesa Online passkey for the shortcode                         |
+| `MPESA_ENV`                                    | `sandbox` (default) or `production`                                     |
+| `PUBLIC_BASE_URL`                              | Public HTTPS origin Daraja sends STK callbacks to                       |
+
+- **OAuth:** the access token is cached in Redis, shared by every instance, and refreshed 60 seconds before Daraja's roughly one-hour expiry. Concurrent callers in one process share a single fetch. If Daraja rejects a cached token anyway, the client fetches a new one and retries once. If Redis is down, it fetches a token per request instead of failing.
+- **STK push:** `password = base64(shortcode + passkey + timestamp)`, with the timestamp as `YYYYMMDDHHmmss` in Africa/Nairobi time. Phone numbers in any common format (`0712 345 678`, `+254712345678`, `0110…`) are normalised to `2547XXXXXXXX` / `2541XXXXXXXX`; anything else is rejected before calling Daraja.
+- **STK Push Query** returns `{ status: "completed", resultCode, ... }` or `{ status: "pending" }` while the customer hasn't responded. Reconciliation will use it for lost callbacks.
+- Every call has a 10-second timeout, and failures throw a `DarajaError` carrying the HTTP status and Daraja's `errorCode`.
+
+Tests run the client against a fake Daraja HTTP server on localhost, so CI never touches the network.
+
+### Sandbox smoke test (manual)
+
+Run this after changing the client to check it against the real sandbox. It needs a Safaricom number with the M-Pesa app or SIM toolkit; the sandbox doesn't move real money.
+
+1. Create an app on the [Daraja portal](https://developer.safaricom.co.ke) with **M-Pesa Sandbox** enabled. Put its Consumer Key and Secret in `.env` as `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET`, and the sandbox passkey (APIs → M-Pesa Express → Simulate) as `MPESA_PASSKEY`. Keep `MPESA_SHORTCODE=174379` and `MPESA_ENV=sandbox`.
+2. Set `PUBLIC_BASE_URL` to any HTTPS URL. The smoke test reads the result with STK Push Query, so the callback doesn't have to be reachable; use a tunnel (`ngrok http 3000`) if you want to see it arrive.
+3. Start Redis (`docker compose up -d`) and run:
+
+   ```bash
+   npm run mpesa:smoke -- 0712345678      # optional second argument: amount (default 1)
+   ```
+
+4. Expect `OAuth token: ok`, then `STK push accepted` with a `checkoutRequestId`, and a payment prompt on the phone. Enter the PIN or cancel; within a few polls the script prints `status: "completed"` with `resultCode: 0` (paid) or `1032` (cancelled). Running it again within the hour reuses the cached token.
 
 ## Deployment
 
