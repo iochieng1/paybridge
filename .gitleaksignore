@@ -1,0 +1,6 @@
+# False positives: placeholder example tokens in the OpenAPI examples of an
+# early commit on the API keys PR (#13). They were never real credentials and
+# have since been replaced with obviously fake placeholders.
+897a5e432c36c55b15b4fb60cca14c3e6b28acfb:src/routes/auth.ts:jwt:39
+897a5e432c36c55b15b4fb60cca14c3e6b28acfb:src/routes/auth.ts:generic-api-key:42
+897a5e432c36c55b15b4fb60cca14c3e6b28acfb:src/routes/auth.ts:generic-api-key:51

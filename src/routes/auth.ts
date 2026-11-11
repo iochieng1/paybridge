@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
-import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type { FastifyReply } from "fastify";
+import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
+import { z } from "zod";
 
 import {
   hashPassword,
@@ -12,52 +14,96 @@ import {
   revokeRefreshTokenFamily,
   rotateRefreshToken,
 } from "../auth/refresh-tokens.js";
+import { isUniqueViolation } from "../db/errors.js";
 import { merchants } from "../db/schema.js";
 import { loginLimit } from "../rate-limit/limits.js";
+import { errorResponse, rateLimited, validationError } from "./schemas.js";
 
 export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 
-const email = { type: "string", format: "email", maxLength: 254 } as const;
+// Placeholders rather than realistic-looking tokens, so secret scanners don't flag them.
+const EXAMPLE_ACCESS_TOKEN = "<header>.<payload>.<signature>";
+const EXAMPLE_REFRESH_TOKEN = "<43-character random token>";
 
-type RegisterBody = { email: string; password: string; name: string };
-type LoginBody = { email: string; password: string };
-type RefreshBody = { refresh_token: string };
+const tokenPairResponse = z
+  .object({
+    access_token: z.string(),
+    token_type: z.literal("Bearer"),
+    expires_in: z.number().int().describe("Access token lifetime in seconds"),
+    refresh_token: z.string(),
+    refresh_expires_in: z
+      .number()
+      .int()
+      .describe("Refresh token lifetime in seconds"),
+  })
+  .describe("A new access token and refresh token")
+  .meta({
+    example: {
+      access_token: EXAMPLE_ACCESS_TOKEN,
+      token_type: "Bearer",
+      expires_in: 900,
+      refresh_token: EXAMPLE_REFRESH_TOKEN,
+      refresh_expires_in: 604800,
+    },
+  });
 
-const refreshBodySchema = {
-  type: "object",
-  required: ["refresh_token"],
-  additionalProperties: false,
-  properties: {
-    refresh_token: { type: "string", minLength: 1, maxLength: 128 },
-  },
-} as const;
+const refreshBody = z
+  .object({ refresh_token: z.string().min(1).max(128) })
+  .strict()
+  .meta({
+    example: { refresh_token: EXAMPLE_REFRESH_TOKEN },
+  });
 
-const isUniqueViolation = (err: unknown): boolean => {
-  if (typeof err !== "object" || err === null) return false;
-  // postgres.js reports SQLSTATE in `code`; Drizzle wraps it in `cause`.
-  const { code, cause } = err as { code?: unknown; cause?: unknown };
-  return code === "23505" || isUniqueViolation(cause);
-};
+const invalidRefreshToken = errorResponse("Invalid refresh token", {
+  statusCode: 401,
+  error: "Unauthorized",
+  message: "Invalid refresh token",
+});
 
-const authRoutes: FastifyPluginAsync = async (app) => {
-  app.post<{ Body: RegisterBody }>(
+const authRoutes: FastifyPluginAsyncZod = async (app) => {
+  app.post(
     "/register",
     {
       schema: {
-        body: {
-          type: "object",
-          required: ["email", "password", "name"],
-          additionalProperties: false,
-          properties: {
-            email,
-            password: { type: "string", minLength: 8, maxLength: 128 },
-            name: {
-              type: "string",
-              minLength: 1,
-              maxLength: 100,
-              pattern: "\\S",
+        summary: "Register a merchant",
+        tags: ["auth"],
+        body: z
+          .object({
+            email: z.email().max(254),
+            password: z.string().min(8).max(128),
+            name: z.string().min(1).max(100).regex(/\S/, "Must not be blank"),
+          })
+          .strict()
+          .meta({
+            example: {
+              email: "owner@duka.co.ke",
+              password: "correct-horse-battery",
+              name: "Duka Ltd",
             },
-          },
+          }),
+        response: {
+          201: z
+            .object({
+              id: z.uuid(),
+              email: z.string(),
+              name: z.string(),
+              created_at: z.iso.datetime(),
+            })
+            .describe("Merchant created")
+            .meta({
+              example: {
+                id: "5f0c6a3e-8b1d-4c2a-9e7f-1a2b3c4d5e6f",
+                email: "owner@duka.co.ke",
+                name: "Duka Ltd",
+                created_at: "2026-11-11T09:30:00.000Z",
+              },
+            }),
+          400: validationError,
+          409: errorResponse("Email already registered", {
+            statusCode: 409,
+            error: "Conflict",
+            message: "An account with this email already exists",
+          }),
         },
       },
     },
@@ -100,19 +146,34 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.post<{ Body: LoginBody }>(
+  app.post(
     "/login",
     {
       preHandler: app.rateLimit(loginLimit),
       schema: {
-        body: {
-          type: "object",
-          required: ["email", "password"],
-          additionalProperties: false,
-          properties: {
-            email: { type: "string", minLength: 1, maxLength: 254 },
-            password: { type: "string", minLength: 1, maxLength: 128 },
-          },
+        summary: "Log in and get an access token and refresh token",
+        tags: ["auth"],
+        body: z
+          .object({
+            email: z.string().min(1).max(254),
+            password: z.string().min(1).max(128),
+          })
+          .strict()
+          .meta({
+            example: {
+              email: "owner@duka.co.ke",
+              password: "correct-horse-battery",
+            },
+          }),
+        response: {
+          200: tokenPairResponse,
+          400: validationError,
+          401: errorResponse("Invalid email or password", {
+            statusCode: 401,
+            error: "Unauthorized",
+            message: "Invalid email or password",
+          }),
+          429: rateLimited,
         },
       },
     },
@@ -143,9 +204,22 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.post<{ Body: RefreshBody }>(
+  app.post(
     "/refresh",
-    { schema: { body: refreshBodySchema } },
+    {
+      schema: {
+        summary: "Rotate a refresh token",
+        description:
+          "Each refresh token works once. Reusing one revokes every token from the same login.",
+        tags: ["auth"],
+        body: refreshBody,
+        response: {
+          200: tokenPairResponse,
+          400: validationError,
+          401: invalidRefreshToken,
+        },
+      },
+    },
     async (request, reply) => {
       const result = await rotateRefreshToken(
         app.db,
@@ -172,9 +246,19 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.post<{ Body: RefreshBody }>(
+  app.post(
     "/logout",
-    { schema: { body: refreshBodySchema } },
+    {
+      schema: {
+        summary: "Log out (revoke the refresh token's session)",
+        tags: ["auth"],
+        body: refreshBody,
+        response: {
+          204: z.undefined().describe("Logged out (also for unknown tokens)"),
+          400: validationError,
+        },
+      },
+    },
     async (request, reply) => {
       await revokeRefreshTokenFamily(app.db, request.body.refresh_token);
       // 204 even for unknown tokens: logout is idempotent and not an oracle.
@@ -189,7 +273,7 @@ const tokenPair = async (
   refreshToken: string,
 ) => ({
   access_token: await reply.jwtSign({ sub: merchantId }),
-  token_type: "Bearer",
+  token_type: "Bearer" as const,
   expires_in: ACCESS_TOKEN_TTL_SECONDS,
   refresh_token: refreshToken,
   refresh_expires_in: REFRESH_TOKEN_TTL_SECONDS,
