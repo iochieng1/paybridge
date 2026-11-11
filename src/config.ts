@@ -20,6 +20,21 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  // Safaricom Daraja (M-Pesa). Credentials come only from the environment.
+  MPESA_CONSUMER_KEY: z.string().min(1),
+  MPESA_CONSUMER_SECRET: z.string().min(1),
+  // 174379 is Safaricom's shared sandbox paybill.
+  MPESA_SHORTCODE: z
+    .string()
+    .regex(/^\d{5,7}$/, "Must be a 5-7 digit shortcode")
+    .default("174379"),
+  MPESA_PASSKEY: z.string().min(1),
+  MPESA_ENV: z.enum(["sandbox", "production"]).default("sandbox"),
+  // Public HTTPS origin Daraja sends STK callbacks to (no trailing slash).
+  PUBLIC_BASE_URL: z
+    .string()
+    .url()
+    .transform((url) => url.replace(/\/+$/, "")),
 });
 
 export type Config = z.infer<typeof envSchema>;

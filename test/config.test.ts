@@ -6,6 +6,10 @@ const validEnv = {
   DATABASE_URL: "postgres://u:p@localhost:5432/db",
   REDIS_URL: "redis://localhost:6379",
   JWT_SECRET: "a".repeat(32),
+  MPESA_CONSUMER_KEY: "consumer-key",
+  MPESA_CONSUMER_SECRET: "consumer-secret",
+  MPESA_PASSKEY: "passkey",
+  PUBLIC_BASE_URL: "https://paybridge.example.com",
 };
 
 describe("loadConfig", () => {
@@ -16,7 +20,26 @@ describe("loadConfig", () => {
       HOST: "0.0.0.0",
       LOG_LEVEL: "info",
       TRUST_PROXY: false,
+      MPESA_SHORTCODE: "174379",
+      MPESA_ENV: "sandbox",
     });
+  });
+
+  it("strips trailing slashes from PUBLIC_BASE_URL", () => {
+    expect(
+      loadConfig({ ...validEnv, PUBLIC_BASE_URL: "https://pay.example.com/" })
+        .PUBLIC_BASE_URL,
+    ).toBe("https://pay.example.com");
+  });
+
+  it.each([
+    ["MPESA_ENV", "staging"],
+    ["MPESA_SHORTCODE", "17-43"],
+    ["PUBLIC_BASE_URL", "not a url"],
+  ])("rejects an invalid %s", (key, value) => {
+    expect(() => loadConfig({ ...validEnv, [key]: value })).toThrow(
+      new RegExp(key),
+    );
   });
 
   it("coerces PORT to a number", () => {
@@ -34,7 +57,7 @@ describe("loadConfig", () => {
 
   it("fails fast and lists every missing variable", () => {
     expect(() => loadConfig({})).toThrow(
-      /DATABASE_URL[\s\S]*REDIS_URL[\s\S]*JWT_SECRET/,
+      /DATABASE_URL[\s\S]*REDIS_URL[\s\S]*JWT_SECRET[\s\S]*MPESA_CONSUMER_KEY[\s\S]*MPESA_CONSUMER_SECRET[\s\S]*MPESA_PASSKEY[\s\S]*PUBLIC_BASE_URL/,
     );
   });
 

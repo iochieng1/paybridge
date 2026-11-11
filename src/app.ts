@@ -11,6 +11,11 @@ import { apiKeyAuth } from "./auth/api-keys.js";
 import { authenticate } from "./auth/authenticate.js";
 import type { Config } from "./config.js";
 import { createDb, type Database } from "./db/client.js";
+import {
+  createDarajaClient,
+  DARAJA_BASE_URLS,
+  type DarajaClient,
+} from "./mpesa/daraja.js";
 import { registerOpenApi } from "./openapi.js";
 import { globalLimit } from "./rate-limit/limits.js";
 import { createRateLimit } from "./rate-limit/rate-limit.js";
@@ -24,6 +29,7 @@ declare module "fastify" {
     config: Config;
     db: Database;
     redis: Redis;
+    daraja: DarajaClient;
   }
 }
 
@@ -32,11 +38,17 @@ export type BuildAppOptions = {
   rateLimitPrefix?: string;
   /** Where logs go instead of stdout; tests use it to inspect log output. */
   logStream?: NodeJS.WritableStream;
+  /** Overrides the Daraja origin picked by MPESA_ENV (tests use a fake server). */
+  darajaBaseUrl?: string;
 };
 
 export const buildApp = async (
   config: Config,
-  { rateLimitPrefix = "ratelimit", logStream }: BuildAppOptions = {},
+  {
+    rateLimitPrefix = "ratelimit",
+    logStream,
+    darajaBaseUrl,
+  }: BuildAppOptions = {},
 ) => {
   const app = Fastify({
     trustProxy: config.TRUST_PROXY,
@@ -60,6 +72,17 @@ export const buildApp = async (
   app.decorate("config", config);
   app.decorate("db", db);
   app.decorate("redis", redis);
+  app.decorate(
+    "daraja",
+    createDarajaClient({
+      consumerKey: config.MPESA_CONSUMER_KEY,
+      consumerSecret: config.MPESA_CONSUMER_SECRET,
+      shortcode: config.MPESA_SHORTCODE,
+      passkey: config.MPESA_PASSKEY,
+      baseUrl: darajaBaseUrl ?? DARAJA_BASE_URLS[config.MPESA_ENV],
+      redis,
+    }),
+  );
 
   app.decorate("rateLimit", createRateLimit(redis, rateLimitPrefix));
   app.addHook("onRequest", app.rateLimit(globalLimit));
