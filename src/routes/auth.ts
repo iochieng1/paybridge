@@ -21,6 +21,10 @@ import { errorResponse, rateLimited, validationError } from "./schemas.js";
 
 export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 
+// Placeholders rather than realistic-looking tokens, so secret scanners don't flag them.
+const EXAMPLE_ACCESS_TOKEN = "<header>.<payload>.<signature>";
+const EXAMPLE_REFRESH_TOKEN = "<43-character random token>";
+
 const tokenPairResponse = z
   .object({
     access_token: z.string(),
@@ -35,11 +39,10 @@ const tokenPairResponse = z
   .describe("A new access token and refresh token")
   .meta({
     example: {
-      access_token:
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1ZjBjLi4uIn0.c2lnbmF0dXJl",
+      access_token: EXAMPLE_ACCESS_TOKEN,
       token_type: "Bearer",
       expires_in: 900,
-      refresh_token: "q0vP3n9yX2pZ8mR4tL6wK1sD5fG7hJ0aB3cE6iO9uY2",
+      refresh_token: EXAMPLE_REFRESH_TOKEN,
       refresh_expires_in: 604800,
     },
   });
@@ -48,7 +51,7 @@ const refreshBody = z
   .object({ refresh_token: z.string().min(1).max(128) })
   .strict()
   .meta({
-    example: { refresh_token: "q0vP3n9yX2pZ8mR4tL6wK1sD5fG7hJ0aB3cE6iO9uY2" },
+    example: { refresh_token: EXAMPLE_REFRESH_TOKEN },
   });
 
 const invalidRefreshToken = errorResponse("Invalid refresh token", {
