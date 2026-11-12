@@ -88,7 +88,8 @@ export const payments = pgTable(
     mpesaReceipt: text("mpesa_receipt").unique(),
     resultCode: integer("result_code"),
     resultDesc: text("result_desc"),
-    callbackTokenHash: text("callback_token_hash"),
+    // SHA-256 of the secret token in this payment's callback URL.
+    callbackTokenHash: text("callback_token_hash").unique(),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()

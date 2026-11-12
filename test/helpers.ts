@@ -29,3 +29,32 @@ export const buildTestApp = (
     rateLimitPrefix: `ratelimit:test:${randomUUID()}`,
     ...options,
   });
+
+type App = Awaited<ReturnType<typeof buildApp>>;
+
+/** Registers a merchant and creates an API key; returns its Authorization header. */
+export const merchantWithApiKey = async (app: App) => {
+  const email = `merchant-${randomUUID()}@example.com`;
+  const password = "correct-horse-battery";
+  const registered = await app.inject({
+    method: "POST",
+    url: "/v1/auth/register",
+    payload: { email, password, name: "Duka" },
+  });
+  const login = await app.inject({
+    method: "POST",
+    url: "/v1/auth/login",
+    payload: { email, password },
+  });
+  const accessToken = login.json<{ access_token: string }>().access_token;
+  const key = await app.inject({
+    method: "POST",
+    url: "/v1/api-keys",
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  return {
+    merchantId: registered.json<{ id: string }>().id,
+    accessToken,
+    authorization: `Bearer ${key.json<{ key: string }>().key}`,
+  };
+};

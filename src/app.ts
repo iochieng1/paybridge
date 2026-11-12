@@ -17,12 +17,17 @@ import {
   type DarajaClient,
 } from "./mpesa/daraja.js";
 import { registerOpenApi } from "./openapi.js";
+import { purgeExpiredIdempotencyKeys } from "./payments/idempotency.js";
 import { globalLimit } from "./rate-limit/limits.js";
 import { createRateLimit } from "./rate-limit/rate-limit.js";
 import apiKeyRoutes from "./routes/api-keys.js";
 import authRoutes, { ACCESS_TOKEN_TTL_SECONDS } from "./routes/auth.js";
 import healthRoutes from "./routes/health.js";
 import merchantRoutes from "./routes/merchants.js";
+import paymentRoutes from "./routes/payments.js";
+
+/** How often expired idempotency keys are deleted. */
+const IDEMPOTENCY_PURGE_INTERVAL_MS = 60 * 60 * 1000;
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -87,7 +92,19 @@ export const buildApp = async (
   app.decorate("rateLimit", createRateLimit(redis, rateLimitPrefix));
   app.addHook("onRequest", app.rateLimit(globalLimit));
 
+  // Expired keys are already ignored on lookup; this just keeps the table small.
+  const purgeTimer = setInterval(() => {
+    purgeExpiredIdempotencyKeys(db).then(
+      (count) =>
+        count > 0 && app.log.info({ count }, "Purged expired idempotency keys"),
+      (err: unknown) =>
+        app.log.error({ err }, "Failed to purge expired idempotency keys"),
+    );
+  }, IDEMPOTENCY_PURGE_INTERVAL_MS);
+  purgeTimer.unref();
+
   app.addHook("onClose", async () => {
+    clearInterval(purgeTimer);
     await Promise.allSettled([sql.end(), redis.quit()]);
   });
 
@@ -108,6 +125,7 @@ export const buildApp = async (
   await app.register(authRoutes, { prefix: "/v1/auth" });
   await app.register(merchantRoutes, { prefix: "/v1/merchants" });
   await app.register(apiKeyRoutes, { prefix: "/v1/api-keys" });
+  await app.register(paymentRoutes, { prefix: "/v1/payments" });
 
   return app;
 };
