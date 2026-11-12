@@ -26,7 +26,7 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] API keys and OpenAPI/Swagger docs
 - [x] Typed Daraja client: OAuth token cached in Redis, STK push, STK Push Query
 - [x] STK push payments with `Idempotency-Key` support
-- [ ] Callback handling with deduplication and a forward-only state machine
+- [x] Callback handling with deduplication and a forward-only state machine
 - [ ] Reconciliation job for lost callbacks (STK Push Query)
 - [ ] HMAC-signed merchant webhooks with exponential-backoff retries
 
@@ -93,6 +93,29 @@ curl -X POST http://localhost:3000/v1/payments \
 - Retrying with the same key and body returns the first response with `Idempotent-Replayed: true`, and never sends a second push. The same key with a different body gets `422`; a retry while the first request is still running gets `409` with `Retry-After: 1`. Keys are kept for 24 hours.
 - `GET /v1/payments/:id` returns one payment; `GET /v1/payments?status=SUCCEEDED&created_from=…&created_to=…&limit=20&cursor=…` lists them newest first. A merchant only ever sees its own payments.
 - Amounts are whole shillings from 1 to 250,000. Every status change is appended to `payment_events`.
+
+## Callbacks
+
+Daraja reports each STK push result by POSTing to the payment's callback URL, `/v1/callbacks/mpesa/:token`.
+
+| `ResultCode`  | Payment status                       |
+| ------------- | ------------------------------------ |
+| `0`           | `SUCCEEDED` (with `mpesa_receipt`)   |
+| `1032`        | `CANCELLED` (customer dismissed it)  |
+| `1037`        | `TIMED_OUT` (customer didn't answer) |
+| anything else | `FAILED`                             |
+
+**The state machine only moves forward.** The update is `UPDATE … WHERE id = ? AND status IN ('CREATED', 'PENDING')`, in one transaction with its `payment_events` row. Once a payment is final, nothing changes it: a duplicate, a replay or a late "failed" after a success updates no row, records no event and still gets `200` so Daraja stops sending it. Concurrent copies of one callback race on the row lock, and exactly one wins. `mpesa_receipt` is unique across all payments.
+
+### Why three checks, when callbacks aren't signed
+
+Daraja doesn't sign callbacks, so anyone who can reach the endpoint could post a fake "paid". Each of these checks covers a gap the others leave:
+
+1. **A secret token per payment.** Each callback URL carries 256 random bits, generated for that payment and sent only to Daraja. Only its SHA-256 hash is stored, so a database leak doesn't reveal working URLs. An unknown token gets `404`. A guessable URL, such as one built from the payment id, would let anyone settle any payment. With a token, a forger would have to see the URL first.
+2. **An optional IP allowlist** (`MPESA_CALLBACK_IP_ALLOWLIST`, comma-separated). Callbacks from anywhere else get `403`, so even a leaked token (in a proxy log, say) is useless from outside Safaricom's network. It's optional because Safaricom's IPs can change and differ per environment, and a wrong list silently drops real payments. Behind a proxy it needs `TRUST_PROXY=true` to see the real client IP.
+3. **STK Push Query for anything unexpected.** If the callback's `CheckoutRequestID` isn't the payment's, a success has no receipt, the `Amount` differs from the payment, or the receipt already belongs to another payment, the callback isn't trusted. PayBridge asks Daraja directly (an authenticated call it initiates) and applies only the query's result. The callback's receipt is never stored in that case, because nothing vouches for it. If the query says the payment is still processing, nothing changes (reconciliation will catch up). If Daraja can't be reached, the callback gets `503` so it can be redelivered.
+
+The token stops outsiders, the allowlist limits the damage if a token leaks, and the query means that even a callback which passes both can't settle a payment with the wrong amount or a fake receipt.
 
 ## Project structure
 
@@ -162,6 +185,7 @@ Decisions and the reasons for them. This section grows as features land.
 | `MPESA_PASSKEY`                                | Lipa na M-Pesa Online passkey for the shortcode                         |
 | `MPESA_ENV`                                    | `sandbox` (default) or `production`                                     |
 | `PUBLIC_BASE_URL`                              | Public HTTPS origin Daraja sends STK callbacks to                       |
+| `MPESA_CALLBACK_IP_ALLOWLIST`                  | Optional comma-separated IPs allowed to post callbacks (empty = any)    |
 
 - **OAuth:** the access token is cached in Redis, shared by every instance, and refreshed 60 seconds before Daraja's roughly one-hour expiry. Concurrent callers in one process share a single fetch. If Daraja rejects a cached token anyway, the client fetches a new one and retries once. If Redis is down, it fetches a token per request instead of failing.
 - **STK push:** `password = base64(shortcode + passkey + timestamp)`, with the timestamp as `YYYYMMDDHHmmss` in Africa/Nairobi time. Phone numbers in any common format (`0712 345 678`, `+254712345678`, `0110…`) are normalised to `2547XXXXXXXX` / `2541XXXXXXXX`; anything else is rejected before calling Daraja.

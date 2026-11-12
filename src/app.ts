@@ -22,6 +22,7 @@ import { globalLimit } from "./rate-limit/limits.js";
 import { createRateLimit } from "./rate-limit/rate-limit.js";
 import apiKeyRoutes from "./routes/api-keys.js";
 import authRoutes, { ACCESS_TOKEN_TTL_SECONDS } from "./routes/auth.js";
+import callbackRoutes from "./routes/callbacks.js";
 import healthRoutes from "./routes/health.js";
 import merchantRoutes from "./routes/merchants.js";
 import paymentRoutes from "./routes/payments.js";
@@ -126,6 +127,7 @@ export const buildApp = async (
   await app.register(merchantRoutes, { prefix: "/v1/merchants" });
   await app.register(apiKeyRoutes, { prefix: "/v1/api-keys" });
   await app.register(paymentRoutes, { prefix: "/v1/payments" });
+  await app.register(callbackRoutes, { prefix: "/v1/callbacks" });
 
   return app;
 };

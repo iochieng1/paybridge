@@ -35,6 +35,19 @@ const envSchema = z.object({
     .string()
     .url()
     .transform((url) => url.replace(/\/+$/, "")),
+  // Comma-separated IPs allowed to post STK callbacks; empty means any.
+  // Daraja doesn't sign callbacks, so this is one of three checks: see the
+  // README. Behind a proxy it needs TRUST_PROXY to see the real client IP.
+  MPESA_CALLBACK_IP_ALLOWLIST: z
+    .string()
+    .default("")
+    .transform((value) =>
+      value
+        .split(",")
+        .map((ip) => ip.trim())
+        .filter(Boolean),
+    )
+    .pipe(z.array(z.union([z.ipv4(), z.ipv6()]))),
 });
 
 export type Config = z.infer<typeof envSchema>;
