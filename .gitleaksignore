@@ -4,3 +4,7 @@
 897a5e432c36c55b15b4fb60cca14c3e6b28acfb:src/routes/auth.ts:jwt:39
 897a5e432c36c55b15b4fb60cca14c3e6b28acfb:src/routes/auth.ts:generic-api-key:42
 897a5e432c36c55b15b4fb60cca14c3e6b28acfb:src/routes/auth.ts:generic-api-key:51
+
+# False positive: a made-up callback token used as an OpenAPI example in the
+# first commit of the callbacks PR (#16), since replaced with a placeholder.
+3ff280db630fbecdf694aa2f45e9719df500914a:src/routes/callbacks.ts:generic-api-key:10

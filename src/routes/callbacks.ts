@@ -7,7 +7,7 @@ import {
 } from "../payments/callbacks.js";
 import { errorResponse, rateLimited, validationError } from "./schemas.js";
 
-const EXAMPLE_TOKEN = "Xq2v9LkP0aZ7rT4mN8bW1cY5dF3gH6jS0eU2iO4pQ7w";
+const EXAMPLE_TOKEN = "example-callback-token-from-the-payment-url";
 
 const stkCallbackBody = z
   .object({
