@@ -1,0 +1,1 @@
+ALTER TABLE "payments" ADD CONSTRAINT "payments_callback_token_hash_unique" UNIQUE("callback_token_hash");

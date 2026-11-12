@@ -22,6 +22,7 @@ export const registerOpenApi = async (app: FastifyInstance) => {
         { name: "auth", description: "Merchant sign-up and sessions" },
         { name: "merchants", description: "The logged-in merchant" },
         { name: "api-keys", description: "Keys for merchant servers" },
+        { name: "payments", description: "M-Pesa STK push payments" },
         { name: "health", description: "Liveness and dependencies" },
       ],
       components: {

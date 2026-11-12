@@ -25,7 +25,7 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] Redis sliding-window rate limiter (atomic Lua script)
 - [x] API keys and OpenAPI/Swagger docs
 - [x] Typed Daraja client: OAuth token cached in Redis, STK push, STK Push Query
-- [ ] STK push payments with `Idempotency-Key` support
+- [x] STK push payments with `Idempotency-Key` support
 - [ ] Callback handling with deduplication and a forward-only state machine
 - [ ] Reconciliation job for lost callbacks (STK Push Query)
 - [ ] HMAC-signed merchant webhooks with exponential-backoff retries
@@ -76,6 +76,24 @@ curl -X DELETE http://localhost:3000/v1/api-keys/$KEY_ID -H "Authorization: Bear
 | `npm run mpesa:smoke -- <phone>`     | Manual Daraja sandbox smoke test (see below)                   |
 | `npm run build && npm start`         | Production build; `start` applies migrations, then boots       |
 
+## Payments
+
+A merchant server creates a payment with its API key. The `Idempotency-Key` header is required:
+
+```bash
+curl -X POST http://localhost:3000/v1/payments \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Idempotency-Key: order-1001-attempt-1" \
+  -H "Content-Type: application/json" \
+  -d '{"phone": "0712345678", "amount": 1500, "reference": "INV-1001", "description": "Order 1001"}'
+```
+
+- `202` with `status: "PENDING"`: the customer has the STK prompt; the result arrives by callback.
+- `502` with `status: "FAILED"` and `result_desc`: M-Pesa rejected the push.
+- Retrying with the same key and body returns the first response with `Idempotent-Replayed: true`, and never sends a second push. The same key with a different body gets `422`; a retry while the first request is still running gets `409` with `Retry-After: 1`. Keys are kept for 24 hours.
+- `GET /v1/payments/:id` returns one payment; `GET /v1/payments?status=SUCCEEDED&created_from=…&created_to=…&limit=20&cursor=…` lists them newest first. A merchant only ever sees its own payments.
+- Amounts are whole shillings from 1 to 250,000. Every status change is appended to `payment_events`.
+
 ## Project structure
 
 ```
@@ -90,6 +108,7 @@ src/
   openapi.ts        # OpenAPI document (/openapi.json) and Swagger UI (/docs)
   auth/             # Passwords, access/refresh tokens, API keys
   mpesa/            # Daraja client (OAuth, STK push, STK query), phone normalisation
+  payments/         # Payment creation, state transitions, idempotency keys
   rate-limit/       # Sliding-window limiter (Lua) and the configured limits
   routes/           # HTTP routes with zod request/response schemas
 drizzle/            # Generated SQL migrations (committed)
@@ -123,6 +142,12 @@ Decisions and the reasons for them. This section grows as features land.
 - **Separate credentials for people and servers.** Access tokens (short-lived, from a password login) manage the account, including creating keys. API keys (long-lived, revocable, one per server) take payments. A leaked API key can't create more keys or change the account, and access tokens aren't accepted on payment routes or vice versa.
 - **The Daraja OAuth token lives in Redis, not in process memory.** Every instance shares one token, so a deploy or restart doesn't fetch a new one, and Daraja's token endpoint isn't hit once per process. It is refreshed a minute early so a request never goes out with a token that expires in flight. The cache key holds a hash of the consumer key, never the key itself.
 - **Daraja calls aren't retried, apart from one retry after a rejected token.** Retrying an STK push after a timeout could prompt the customer twice. Whether a push went through is answered later by the callback or STK Push Query, not by guessing.
+- **Idempotency keys are claimed with `INSERT … ON CONFLICT DO NOTHING`.** The primary key is `(merchant_id, key)`, so of any number of concurrent requests with the same key, Postgres lets exactly one insert through. Only that one sends the STK push; the rest get `409` while it runs and a replay of its stored response afterwards. Checking first and inserting after would let two requests both see "no key" and both charge the customer. The key also stores a SHA-256 of the request (phone normalised, field order ignored), so reusing a key for a different payment is caught (`422`) instead of silently returning the wrong payment.
+- **`409` while in progress, rather than waiting.** Holding the duplicate request open until the first finishes would tie up a connection for as long as Daraja takes. A `409` with `Retry-After` is cheap, and the retry gets the stored response.
+- **A key stays claimed if the push may have been sent.** If anything fails after Daraja was called, the key is not released: a retry with the same key gets `409` until the key expires. That's annoying but recoverable (use a new key after checking the payment); releasing it could charge the customer twice. Failures before the call release the key so the client can simply retry.
+- **An unclear STK push result is left `PENDING`, not marked failed.** A timeout, network error or 5xx without an error code doesn't say whether the customer was prompted. Marking it `FAILED` would be wrong if they then pay, so the payment stays `PENDING` and the callback (found by its token, which doesn't need a checkout id) or reconciliation settles it. Only a definite rejection (a Daraja error code or a 4xx) is `FAILED`.
+- **Expired keys are purged hourly and ignored on lookup.** A key older than 24 hours is deleted before it's claimed again, so expiry is exact even between purges; the hourly job only keeps the table small.
+- **Cursor pagination over `(created_at, id)`.** Offsets get slow and skip or repeat rows when new payments arrive between pages; a keyset cursor doesn't. The cursor holds `created_at` as Postgres prints it, to the microsecond, because a JS `Date` keeps only milliseconds and would lose rows created within the same millisecond.
 - **Fastify over Express.** It has schema-based validation and serialisation built in, and OpenAPI generation comes from the same schemas.
 - **zod schemas are the single source of truth for each route.** The same schema validates the request, types the handler, filters the response (unknown fields are never serialised, so a column like `key_hash` can't leak by accident) and generates the OpenAPI document served at `/openapi.json` and `/docs`. Every route documents its request, its responses and an example payload, and a test fails if one doesn't or if the document stops being valid OpenAPI 3.1.
 

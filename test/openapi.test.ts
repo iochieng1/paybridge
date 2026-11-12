@@ -76,6 +76,8 @@ describe("OpenAPI", () => {
       "/v1/auth/refresh",
       "/v1/auth/register",
       "/v1/merchants/me",
+      "/v1/payments",
+      "/v1/payments/{id}",
     ]);
   });
 
