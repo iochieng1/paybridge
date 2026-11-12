@@ -22,7 +22,17 @@ describe("loadConfig", () => {
       TRUST_PROXY: false,
       MPESA_SHORTCODE: "174379",
       MPESA_ENV: "sandbox",
+      MPESA_CALLBACK_IP_ALLOWLIST: [],
     });
+  });
+
+  it("parses the callback IP allowlist", () => {
+    expect(
+      loadConfig({
+        ...validEnv,
+        MPESA_CALLBACK_IP_ALLOWLIST: " 196.201.214.200, 196.201.214.206 ,",
+      }).MPESA_CALLBACK_IP_ALLOWLIST,
+    ).toEqual(["196.201.214.200", "196.201.214.206"]);
   });
 
   it("strips trailing slashes from PUBLIC_BASE_URL", () => {
@@ -36,6 +46,7 @@ describe("loadConfig", () => {
     ["MPESA_ENV", "staging"],
     ["MPESA_SHORTCODE", "17-43"],
     ["PUBLIC_BASE_URL", "not a url"],
+    ["MPESA_CALLBACK_IP_ALLOWLIST", "196.201.214.200,not-an-ip"],
   ])("rejects an invalid %s", (key, value) => {
     expect(() => loadConfig({ ...validEnv, [key]: value })).toThrow(
       new RegExp(key),

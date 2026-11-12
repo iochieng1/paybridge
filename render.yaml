@@ -36,6 +36,9 @@ services:
       # The service's public URL, e.g. https://paybridge-api.onrender.com
       - key: PUBLIC_BASE_URL
         sync: false
+      # Optional: Safaricom's callback IPs, comma-separated (empty = any).
+      - key: MPESA_CALLBACK_IP_ALLOWLIST
+        sync: false
 
   - type: keyvalue
     name: paybridge-redis
