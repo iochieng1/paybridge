@@ -4,17 +4,15 @@
 
 **An M-Pesa payments gateway API that is rate-limited, idempotent, and can't double-credit a payment.**
 
-> 🚧 Work in progress. Day 1 of 10: scaffold, database schema, health checks, CI.
->
-> <!-- TODO: demo GIF here once payments work (day 10) -->
->
-> **Live API:** _coming soon_ · **Docs:** `/docs` (Swagger UI) · `/openapi.json`
+<!-- TODO(#9): demo GIF here: create a payment, STK prompt on the phone, webhook arrives -->
+
+> **Live API:** _deploying soon_ · **Docs:** `/docs` (Swagger UI) · `/openapi.json`
 
 PayBridge lets any app accept M-Pesa payments through one clean REST API. It deals with the messy parts of Safaricom's Daraja API: STK push timeouts, duplicate callbacks, unsigned webhooks and token expiry. You don't have to.
 
 The public demo runs against the **Daraja sandbox**. No real money moves.
 
-## Features (roadmap)
+## Features
 
 - [x] Fastify + TypeScript service with validated config and graceful shutdown
 - [x] PostgreSQL schema and migrations for merchants, tokens, API keys, payments, audit log, idempotency and webhooks
@@ -29,6 +27,51 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] Callback handling with deduplication and a forward-only state machine
 - [x] Reconciliation job for lost callbacks (STK Push Query)
 - [x] HMAC-signed merchant webhooks with exponential-backoff retries
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Merchant
+        MS[Merchant server]
+        WH[Webhook receiver]
+    end
+
+    subgraph PayBridge
+        API[Fastify API<br/>auth · rate limit · idempotency]
+        PG[(PostgreSQL<br/>payments · events · deliveries)]
+        RD[(Redis<br/>rate limits · OAuth token · BullMQ)]
+        WK[BullMQ workers<br/>webhooks · reconciliation]
+    end
+
+    subgraph Safaricom
+        DJ[Daraja API]
+        PH((Customer's phone))
+    end
+
+    MS -- "1. POST /v1/payments<br/>API key + Idempotency-Key" --> API
+    API -- "2. STK push" --> DJ
+    DJ -- "3. PIN prompt" --> PH
+    PH -- "4. customer enters PIN" --> DJ
+    DJ -- "5. callback to secret per-payment URL" --> API
+    API -- "forward-only UPDATE + event" --> PG
+    API -- "6. queue webhook" --> RD
+    RD --> WK
+    WK -- "7. signed POST, retried with backoff" --> WH
+    WK -. "every minute: STK Push Query<br/>for payments stuck in PENDING" .-> DJ
+    API <--> RD
+    WK <--> PG
+```
+
+1. The merchant's server creates a payment with its API key and an `Idempotency-Key`. A retry with the same key replays the first response and never sends a second push.
+2. PayBridge sends an STK push to Daraja with a callback URL that contains a 256-bit token for this payment.
+3. Daraja shows the customer a PIN prompt for the amount.
+4. The customer enters their PIN, cancels or ignores it.
+5. Daraja posts the result to the callback URL. PayBridge checks it, confirming with STK Push Query if anything looks wrong, and settles the payment with a conditional `UPDATE`, so duplicates and late callbacks change nothing.
+6. The final status queues a webhook job (one per payment).
+7. A worker POSTs it to the merchant, signed with HMAC-SHA256, and retries for about 15 hours if it fails.
+
+If step 5 never happens, the every-minute reconciliation job asks Daraja about the payment and settles it the same way.
 
 ## Quick start
 
@@ -74,6 +117,7 @@ curl -X DELETE http://localhost:3000/v1/api-keys/$KEY_ID -H "Authorization: Bear
 | `npm run db:generate`                | Generate a SQL migration after editing `src/db/schema.ts`      |
 | `npm run db:migrate`                 | Apply migrations to `DATABASE_URL`                             |
 | `npm run mpesa:smoke -- <phone>`     | Manual Daraja sandbox smoke test (see below)                   |
+| `k6 run load/rate-limit.js`          | Load test the rate limiter (see Load testing)                  |
 | `npm run build && npm start`         | Production build; `start` applies migrations, then boots       |
 
 ## Payments
@@ -298,9 +342,26 @@ Run this after changing the client to check it against the real sandbox. It need
 
 4. Expect `OAuth token: ok`, then `STK push accepted` with a `checkoutRequestId`, and a payment prompt on the phone. Enter the PIN or cancel; within a few polls the script prints `status: "completed"` with `resultCode: 0` (paid) or `1032` (cancelled). Running it again within the hour reuses the cached token.
 
+## Load testing
+
+`load/rate-limit.js` is a [k6](https://k6.io) script that sends 240 payment requests a minute on one API key against a limit of 60, with steady `/health` traffic alongside. It fails if more than 60 payments get through in the minute, if any request gets a `5xx`, or if p95 latency goes over 200 ms.
+
+```bash
+BASE_URL=https://<your-service>.onrender.com API_KEY=pb_test_... k6 run load/rate-limit.js
+```
+
+<!-- TODO(#9): paste the k6 summary from a run against the deployed service here. -->
+
 ## Deployment
 
-`render.yaml` is a Render Blueprint that creates the web service (Docker), PostgreSQL and Key Value (Redis). Connect the repo in Render → **New → Blueprint**.
+`render.yaml` is a Render Blueprint that creates the web service (Docker), PostgreSQL and Key Value (Redis):
+
+1. In Render, choose **New → Blueprint** and connect this repository.
+2. When prompted, fill in the variables marked `sync: false`: the Daraja **sandbox** `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET` and `MPESA_PASSKEY`, and `PUBLIC_BASE_URL` (the service's `https://….onrender.com` URL, which Render shows once the service exists; set it and redeploy). `JWT_SECRET` and `WEBHOOK_ENCRYPTION_KEY` are generated for you.
+3. Deploy. Migrations run on start-up, and `/health` turns green once Postgres and Redis are reachable.
+4. Open `/docs` on the service URL, register a merchant, log in, create an API key, and create a payment to your own Safaricom number.
+
+The free web service sleeps when idle, so the first request after a while takes about 30 seconds while it wakes up. The reconciliation job and webhook retries pause while it sleeps and catch up when it wakes.
 
 ## License
 
