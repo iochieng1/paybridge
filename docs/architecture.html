@@ -1,0 +1,599 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <!-- Source for docs/architecture.png. Re-render with:
+     chromium --headless --disable-gpu --hide-scrollbars --window-size=1600,900 --screenshot=docs/architecture.png docs/architecture.html -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1600px;
+        height: 900px;
+        overflow: hidden;
+      }
+      body {
+        background: radial-gradient(
+          circle at 75% 15%,
+          #12324a 0%,
+          #0b1726 55%,
+          #070f1a 100%
+        );
+        font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        color: #e8eef5;
+      }
+    </style>
+  </head>
+  <body>
+    <svg
+      width="1600"
+      height="900"
+      viewBox="0 0 1600 900"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="8"
+          markerHeight="8"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" fill="#8fb3cf" />
+        </marker>
+        <marker
+          id="arrowGreen"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="8"
+          markerHeight="8"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" fill="#4cd38a" />
+        </marker>
+        <marker
+          id="arrowAmber"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="8"
+          markerHeight="8"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" fill="#f5b942" />
+        </marker>
+        <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#14402c" />
+          <stop offset="1" stop-color="#0e2c20" />
+        </linearGradient>
+      </defs>
+
+      <!-- Title -->
+      <text x="70" y="92" font-size="52" font-weight="800" fill="#ffffff">
+        Pay
+        <tspan fill="#4cd38a">Bridge</tspan>
+      </text>
+      <text x="70" y="136" font-size="24" fill="#a9bccd">
+        An M-Pesa payments API that can't charge twice and can't credit twice
+      </text>
+
+      <!-- Merchant column -->
+      <g>
+        <rect
+          x="70"
+          y="210"
+          width="290"
+          height="430"
+          rx="22"
+          fill="#0f2236"
+          stroke="#2b4a66"
+          stroke-width="2"
+        />
+        <text
+          x="215"
+          y="252"
+          font-size="22"
+          font-weight="700"
+          text-anchor="middle"
+          fill="#ffffff"
+        >
+          Merchant
+        </text>
+        <text
+          x="215"
+          y="278"
+          font-size="16"
+          text-anchor="middle"
+          fill="#8fa6ba"
+        >
+          e.g. an online shop
+        </text>
+
+        <rect
+          x="100"
+          y="310"
+          width="230"
+          height="110"
+          rx="14"
+          fill="#16304a"
+          stroke="#3a5f80"
+        />
+        <text
+          x="215"
+          y="355"
+          font-size="19"
+          font-weight="600"
+          text-anchor="middle"
+          fill="#e8eef5"
+        >
+          Shop server
+        </text>
+        <text
+          x="215"
+          y="384"
+          font-size="15"
+          text-anchor="middle"
+          fill="#8fa6ba"
+        >
+          API key + Idempotency-Key
+        </text>
+
+        <rect
+          x="100"
+          y="490"
+          width="230"
+          height="110"
+          rx="14"
+          fill="#16304a"
+          stroke="#3a5f80"
+        />
+        <text
+          x="215"
+          y="535"
+          font-size="19"
+          font-weight="600"
+          text-anchor="middle"
+          fill="#e8eef5"
+        >
+          Webhook receiver
+        </text>
+        <text
+          x="215"
+          y="564"
+          font-size="15"
+          text-anchor="middle"
+          fill="#8fa6ba"
+        >
+          verifies the HMAC signature
+        </text>
+      </g>
+
+      <!-- PayBridge core -->
+      <g>
+        <rect
+          x="500"
+          y="190"
+          width="600"
+          height="470"
+          rx="26"
+          fill="url(#core)"
+          stroke="#4cd38a"
+          stroke-width="2.5"
+        />
+        <text
+          x="800"
+          y="236"
+          font-size="24"
+          font-weight="800"
+          text-anchor="middle"
+          fill="#ffffff"
+        >
+          PayBridge
+        </text>
+
+        <rect
+          x="535"
+          y="262"
+          width="530"
+          height="96"
+          rx="14"
+          fill="#0b2419"
+          stroke="#2f7a55"
+        />
+        <text x="560" y="298" font-size="19" font-weight="700" fill="#e8eef5">
+          Fastify API
+        </text>
+        <text x="560" y="328" font-size="15" fill="#9cc7b0">
+          auth · rate limiting · idempotency · forward-only state machine
+        </text>
+
+        <rect
+          x="535"
+          y="378"
+          width="255"
+          height="110"
+          rx="14"
+          fill="#0b2419"
+          stroke="#2f7a55"
+        />
+        <text
+          x="662"
+          y="420"
+          font-size="19"
+          font-weight="700"
+          text-anchor="middle"
+          fill="#e8eef5"
+        >
+          PostgreSQL
+        </text>
+        <text
+          x="662"
+          y="448"
+          font-size="14"
+          text-anchor="middle"
+          fill="#9cc7b0"
+        >
+          payments · audit events
+        </text>
+        <text
+          x="662"
+          y="468"
+          font-size="14"
+          text-anchor="middle"
+          fill="#9cc7b0"
+        >
+          webhook deliveries
+        </text>
+
+        <rect
+          x="810"
+          y="378"
+          width="255"
+          height="110"
+          rx="14"
+          fill="#0b2419"
+          stroke="#2f7a55"
+        />
+        <text
+          x="937"
+          y="420"
+          font-size="19"
+          font-weight="700"
+          text-anchor="middle"
+          fill="#e8eef5"
+        >
+          Redis
+        </text>
+        <text
+          x="937"
+          y="448"
+          font-size="14"
+          text-anchor="middle"
+          fill="#9cc7b0"
+        >
+          rate limits · OAuth token
+        </text>
+        <text
+          x="937"
+          y="468"
+          font-size="14"
+          text-anchor="middle"
+          fill="#9cc7b0"
+        >
+          BullMQ queues
+        </text>
+
+        <rect
+          x="535"
+          y="508"
+          width="530"
+          height="122"
+          rx="14"
+          fill="#0b2419"
+          stroke="#2f7a55"
+        />
+        <text x="560" y="545" font-size="19" font-weight="700" fill="#e8eef5">
+          Background workers
+        </text>
+        <text x="560" y="576" font-size="15" fill="#9cc7b0">
+          Signed webhooks, retried after 1m · 5m · 30m · 2h · 12h
+        </text>
+        <text x="560" y="604" font-size="15" fill="#9cc7b0">
+          Reconciliation every minute for lost callbacks
+        </text>
+      </g>
+
+      <!-- Safaricom column -->
+      <g>
+        <rect
+          x="1240"
+          y="210"
+          width="290"
+          height="430"
+          rx="22"
+          fill="#0f2236"
+          stroke="#2b4a66"
+          stroke-width="2"
+        />
+        <text
+          x="1385"
+          y="252"
+          font-size="22"
+          font-weight="700"
+          text-anchor="middle"
+          fill="#ffffff"
+        >
+          Safaricom
+        </text>
+
+        <rect
+          x="1270"
+          y="290"
+          width="230"
+          height="110"
+          rx="14"
+          fill="#16304a"
+          stroke="#3a5f80"
+        />
+        <text
+          x="1385"
+          y="335"
+          font-size="19"
+          font-weight="600"
+          text-anchor="middle"
+          fill="#e8eef5"
+        >
+          Daraja API
+        </text>
+        <text
+          x="1385"
+          y="364"
+          font-size="15"
+          text-anchor="middle"
+          fill="#8fa6ba"
+        >
+          STK push · STK query
+        </text>
+
+        <!-- phone -->
+        <rect
+          x="1335"
+          y="460"
+          width="100"
+          height="160"
+          rx="16"
+          fill="#16304a"
+          stroke="#3a5f80"
+          stroke-width="2"
+        />
+        <rect x="1347" y="480" width="76" height="110" rx="6" fill="#0b1726" />
+        <text
+          x="1385"
+          y="522"
+          font-size="12"
+          text-anchor="middle"
+          fill="#4cd38a"
+          font-weight="700"
+        >
+          M-PESA
+        </text>
+        <text
+          x="1385"
+          y="545"
+          font-size="11"
+          text-anchor="middle"
+          fill="#a9bccd"
+        >
+          Pay KES 1,500?
+        </text>
+        <text
+          x="1385"
+          y="568"
+          font-size="11"
+          text-anchor="middle"
+          fill="#a9bccd"
+        >
+          Enter PIN
+        </text>
+        <circle cx="1385" cy="605" r="6" fill="#3a5f80" />
+      </g>
+
+      <!-- Arrows -->
+      <!-- 1 create payment -->
+      <line
+        x1="330"
+        y1="345"
+        x2="530"
+        y2="300"
+        stroke="#8fb3cf"
+        stroke-width="3"
+        marker-end="url(#arrow)"
+      />
+      <circle cx="420" cy="306" r="15" fill="#8fb3cf" />
+      <text
+        x="420"
+        y="312"
+        font-size="16"
+        font-weight="800"
+        text-anchor="middle"
+        fill="#0b1726"
+      >
+        1
+      </text>
+      <text x="372" y="282" font-size="14" fill="#a9bccd">
+        POST /v1/payments
+      </text>
+
+      <!-- 2 STK push -->
+      <line
+        x1="1065"
+        y1="290"
+        x2="1265"
+        y2="320"
+        stroke="#8fb3cf"
+        stroke-width="3"
+        marker-end="url(#arrow)"
+      />
+      <circle cx="1160" cy="286" r="15" fill="#8fb3cf" />
+      <text
+        x="1160"
+        y="292"
+        font-size="16"
+        font-weight="800"
+        text-anchor="middle"
+        fill="#0b1726"
+      >
+        2
+      </text>
+      <text x="1160" y="262" font-size="14" text-anchor="middle" fill="#a9bccd">
+        STK push
+      </text>
+
+      <!-- 3 prompt to phone -->
+      <line
+        x1="1385"
+        y1="402"
+        x2="1385"
+        y2="455"
+        stroke="#8fb3cf"
+        stroke-width="3"
+        marker-end="url(#arrow)"
+      />
+      <circle cx="1412" cy="430" r="15" fill="#8fb3cf" />
+      <text
+        x="1412"
+        y="436"
+        font-size="16"
+        font-weight="800"
+        text-anchor="middle"
+        fill="#0b1726"
+      >
+        3
+      </text>
+
+      <!-- 4 callback -->
+      <path
+        d="M1268,375 C1180,380 1130,330 1068,330"
+        fill="none"
+        stroke="#4cd38a"
+        stroke-width="3"
+        marker-end="url(#arrowGreen)"
+      />
+      <circle cx="1170" cy="364" r="15" fill="#4cd38a" />
+      <text
+        x="1170"
+        y="370"
+        font-size="16"
+        font-weight="800"
+        text-anchor="middle"
+        fill="#0b1726"
+      >
+        4
+      </text>
+      <text x="1170" y="402" font-size="14" text-anchor="middle" fill="#9fe3bd">
+        callback to
+      </text>
+      <text x="1170" y="420" font-size="14" text-anchor="middle" fill="#9fe3bd">
+        a secret URL
+      </text>
+
+      <!-- reconciliation dashed -->
+      <path
+        d="M1068,600 C1170,640 1250,520 1300,402"
+        fill="none"
+        stroke="#f5b942"
+        stroke-width="2.5"
+        stroke-dasharray="8 7"
+        marker-end="url(#arrowAmber)"
+      />
+      <text x="1105" y="660" font-size="14" fill="#f5cf7a">
+        no callback? STK query
+      </text>
+
+      <!-- 5 webhook -->
+      <line
+        x1="532"
+        y1="570"
+        x2="336"
+        y2="545"
+        stroke="#4cd38a"
+        stroke-width="3"
+        marker-end="url(#arrowGreen)"
+      />
+      <circle cx="434" cy="557" r="15" fill="#4cd38a" />
+      <text
+        x="434"
+        y="563"
+        font-size="16"
+        font-weight="800"
+        text-anchor="middle"
+        fill="#0b1726"
+      >
+        5
+      </text>
+      <text x="376" y="604" font-size="14" fill="#9fe3bd">signed webhook</text>
+
+      <!-- Guarantees -->
+      <g font-size="17" font-weight="600">
+        <rect
+          x="70"
+          y="712"
+          width="335"
+          height="52"
+          rx="26"
+          fill="#11283c"
+          stroke="#2b4a66"
+        />
+        <text x="237" y="744" text-anchor="middle" fill="#e8eef5">
+          ✓ Retries never prompt twice
+        </text>
+        <rect
+          x="425"
+          y="712"
+          width="350"
+          height="52"
+          rx="26"
+          fill="#11283c"
+          stroke="#2b4a66"
+        />
+        <text x="600" y="744" text-anchor="middle" fill="#e8eef5">
+          ✓ 10 duplicate callbacks → 1 credit
+        </text>
+        <rect
+          x="795"
+          y="712"
+          width="350"
+          height="52"
+          rx="26"
+          fill="#11283c"
+          stroke="#2b4a66"
+        />
+        <text x="970" y="744" text-anchor="middle" fill="#e8eef5">
+          ✓ Forged callbacks are rejected
+        </text>
+        <rect
+          x="1165"
+          y="712"
+          width="365"
+          height="52"
+          rx="26"
+          fill="#11283c"
+          stroke="#2b4a66"
+        />
+        <text x="1347" y="744" text-anchor="middle" fill="#e8eef5">
+          ✓ Lost callbacks get reconciled
+        </text>
+      </g>
+
+      <text x="70" y="840" font-size="19" fill="#8fa6ba">
+        TypeScript · Fastify · PostgreSQL · Redis · BullMQ · Docker
+      </text>
+      <text x="1530" y="840" font-size="19" text-anchor="end" fill="#8fa6ba">
+        github.com/iochieng1/paybridge
+      </text>
+    </svg>
+  </body>
+</html>

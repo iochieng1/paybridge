@@ -31,6 +31,7 @@ const envSchema = z.object({
   MPESA_PASSKEY: z.string().min(1),
   MPESA_ENV: z.enum(["sandbox", "production"]).default("sandbox"),
   // Public HTTPS origin Daraja sends STK callbacks to (no trailing slash).
+  // Falls back to RENDER_EXTERNAL_URL on Render.
   PUBLIC_BASE_URL: z
     .string()
     .url()
@@ -70,7 +71,12 @@ export type Config = z.infer<typeof envSchema>;
 
 /** Parses and validates environment variables, failing fast on bad config. */
 export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
-  const result = envSchema.safeParse(env);
+  const result = envSchema.safeParse({
+    ...env,
+    // Render sets RENDER_EXTERNAL_URL to the service's public https origin,
+    // so a deploy needs no manual PUBLIC_BASE_URL.
+    PUBLIC_BASE_URL: env.PUBLIC_BASE_URL || env.RENDER_EXTERNAL_URL,
+  });
 
   if (!result.success) {
     const issues = result.error.issues

@@ -38,6 +38,24 @@ describe("loadConfig", () => {
     ).toEqual(["196.201.214.200", "196.201.214.206"]);
   });
 
+  it("falls back to Render's RENDER_EXTERNAL_URL for PUBLIC_BASE_URL", () => {
+    const withoutBaseUrl: Record<string, string> = { ...validEnv };
+    delete withoutBaseUrl.PUBLIC_BASE_URL;
+
+    expect(
+      loadConfig({
+        ...withoutBaseUrl,
+        RENDER_EXTERNAL_URL: "https://paybridge-api.onrender.com",
+      }).PUBLIC_BASE_URL,
+    ).toBe("https://paybridge-api.onrender.com");
+    expect(
+      loadConfig({
+        ...validEnv,
+        RENDER_EXTERNAL_URL: "https://paybridge-api.onrender.com",
+      }).PUBLIC_BASE_URL,
+    ).toBe("https://paybridge.example.com");
+  });
+
   it("strips trailing slashes from PUBLIC_BASE_URL", () => {
     expect(
       loadConfig({ ...validEnv, PUBLIC_BASE_URL: "https://pay.example.com/" })

@@ -19,7 +19,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
     "db:studio": "drizzle-kit studio",
-    "mpesa:smoke": "tsx --env-file=.env src/mpesa/smoke.ts"
+    "mpesa:smoke": "tsx --env-file=.env src/mpesa/smoke.ts",
+    "demo": "tsx scripts/demo.ts"
   },
   "dependencies": {
     "@fastify/jwt": "^10.2.7",
