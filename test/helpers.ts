@@ -16,6 +16,11 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
     MPESA_CONSUMER_SECRET: "test-consumer-secret",
     MPESA_PASSKEY: "test-passkey",
     PUBLIC_BASE_URL: "https://paybridge.example.com",
+    WEBHOOK_ENCRYPTION_KEY: "test-webhook-encryption-key-32-chars-min",
+    // Tests deliver webhooks to a receiver on 127.0.0.1.
+    WEBHOOK_ALLOW_PRIVATE_URLS: "true",
+    // Only the webhook and reconciliation tests start workers.
+    RUN_WORKERS: "false",
   }),
   ...overrides,
 });
@@ -27,6 +32,7 @@ export const buildTestApp = (
 ) =>
   buildApp(testConfig(overrides), {
     rateLimitPrefix: `ratelimit:test:${randomUUID()}`,
+    queuePrefix: `bull-test-${randomUUID()}`,
     ...options,
   });
 

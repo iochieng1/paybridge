@@ -48,6 +48,22 @@ const envSchema = z.object({
         .filter(Boolean),
     )
     .pipe(z.array(z.union([z.ipv4(), z.ipv6()]))),
+  // Encrypts merchants' webhook signing secrets at rest. 32+ characters;
+  // generate one with: openssl rand -base64 48. Changing it makes existing
+  // secrets unreadable, so merchants would have to set their endpoint again.
+  WEBHOOK_ENCRYPTION_KEY: z.string().min(32),
+  // Let webhook URLs point at private addresses (localhost, 10.x, ...). Only
+  // for local development: in production it would let a merchant make
+  // PayBridge call internal services (SSRF).
+  WEBHOOK_ALLOW_PRIVATE_URLS: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  // Run the BullMQ workers (webhooks, reconciliation) in this process.
+  RUN_WORKERS: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
 });
 
 export type Config = z.infer<typeof envSchema>;

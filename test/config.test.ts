@@ -10,6 +10,7 @@ const validEnv = {
   MPESA_CONSUMER_SECRET: "consumer-secret",
   MPESA_PASSKEY: "passkey",
   PUBLIC_BASE_URL: "https://paybridge.example.com",
+  WEBHOOK_ENCRYPTION_KEY: "b".repeat(32),
 };
 
 describe("loadConfig", () => {
@@ -23,6 +24,8 @@ describe("loadConfig", () => {
       MPESA_SHORTCODE: "174379",
       MPESA_ENV: "sandbox",
       MPESA_CALLBACK_IP_ALLOWLIST: [],
+      WEBHOOK_ALLOW_PRIVATE_URLS: false,
+      RUN_WORKERS: true,
     });
   });
 
