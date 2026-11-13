@@ -138,6 +138,7 @@ const callbackRoutes: FastifyPluginAsyncZod = async (app) => {
             },
             "Applied M-Pesa callback",
           );
+          await app.jobs.notifyPaymentFinal(outcome.payment);
           return accepted;
         case "ignored":
           log.info("Ignored duplicate or late M-Pesa callback");

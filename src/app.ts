@@ -11,6 +11,7 @@ import { apiKeyAuth } from "./auth/api-keys.js";
 import { authenticate } from "./auth/authenticate.js";
 import type { Config } from "./config.js";
 import { createDb, type Database } from "./db/client.js";
+import { createJobs, type Jobs } from "./jobs/jobs.js";
 import {
   createDarajaClient,
   DARAJA_BASE_URLS,
@@ -26,6 +27,8 @@ import callbackRoutes from "./routes/callbacks.js";
 import healthRoutes from "./routes/health.js";
 import merchantRoutes from "./routes/merchants.js";
 import paymentRoutes from "./routes/payments.js";
+import webhookEndpointRoutes from "./routes/webhook-endpoint.js";
+import { deriveEncryptionKey } from "./webhooks/secrets.js";
 
 /** How often expired idempotency keys are deleted. */
 const IDEMPOTENCY_PURGE_INTERVAL_MS = 60 * 60 * 1000;
@@ -36,6 +39,8 @@ declare module "fastify" {
     db: Database;
     redis: Redis;
     daraja: DarajaClient;
+    jobs: Jobs;
+    webhookEncryptionKey: Buffer;
   }
 }
 
@@ -46,6 +51,11 @@ export type BuildAppOptions = {
   logStream?: NodeJS.WritableStream;
   /** Overrides the Daraja origin picked by MPESA_ENV (tests use a fake server). */
   darajaBaseUrl?: string;
+  /** Namespace for BullMQ keys in Redis; tests use a unique one per app. */
+  queuePrefix?: string;
+  /** Overrides the webhook retry delays (tests use milliseconds). */
+  webhookRetryDelaysMs?: number[];
+  webhookTimeoutMs?: number;
 };
 
 export const buildApp = async (
@@ -54,6 +64,9 @@ export const buildApp = async (
     rateLimitPrefix = "ratelimit",
     logStream,
     darajaBaseUrl,
+    queuePrefix,
+    webhookRetryDelaysMs,
+    webhookTimeoutMs,
   }: BuildAppOptions = {},
 ) => {
   const app = Fastify({
@@ -90,6 +103,24 @@ export const buildApp = async (
     }),
   );
 
+  const webhookEncryptionKey = deriveEncryptionKey(
+    config.WEBHOOK_ENCRYPTION_KEY,
+  );
+  app.decorate("webhookEncryptionKey", webhookEncryptionKey);
+  const jobs = createJobs({
+    redisUrl: config.REDIS_URL,
+    db,
+    daraja: app.daraja,
+    log: app.log,
+    encryptionKey: webhookEncryptionKey,
+    allowPrivateAddresses: config.WEBHOOK_ALLOW_PRIVATE_URLS,
+    runWorkers: config.RUN_WORKERS,
+    prefix: queuePrefix,
+    retryDelaysMs: webhookRetryDelaysMs,
+    webhookTimeoutMs,
+  });
+  app.decorate("jobs", jobs);
+
   app.decorate("rateLimit", createRateLimit(redis, rateLimitPrefix));
   app.addHook("onRequest", app.rateLimit(globalLimit));
 
@@ -106,6 +137,8 @@ export const buildApp = async (
 
   app.addHook("onClose", async () => {
     clearInterval(purgeTimer);
+    // Workers first: they finish their current job, which may use the db.
+    await jobs.close();
     await Promise.allSettled([sql.end(), redis.quit()]);
   });
 
@@ -128,6 +161,9 @@ export const buildApp = async (
   await app.register(apiKeyRoutes, { prefix: "/v1/api-keys" });
   await app.register(paymentRoutes, { prefix: "/v1/payments" });
   await app.register(callbackRoutes, { prefix: "/v1/callbacks" });
+  await app.register(webhookEndpointRoutes, {
+    prefix: "/v1/webhook-endpoint",
+  });
 
   return app;
 };

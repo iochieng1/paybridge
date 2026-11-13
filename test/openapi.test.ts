@@ -79,6 +79,8 @@ describe("OpenAPI", () => {
       "/v1/merchants/me",
       "/v1/payments",
       "/v1/payments/{id}",
+      "/v1/payments/{id}/webhook-deliveries",
+      "/v1/webhook-endpoint",
     ]);
   });
 

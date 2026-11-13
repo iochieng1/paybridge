@@ -27,8 +27,8 @@ The public demo runs against the **Daraja sandbox**. No real money moves.
 - [x] Typed Daraja client: OAuth token cached in Redis, STK push, STK Push Query
 - [x] STK push payments with `Idempotency-Key` support
 - [x] Callback handling with deduplication and a forward-only state machine
-- [ ] Reconciliation job for lost callbacks (STK Push Query)
-- [ ] HMAC-signed merchant webhooks with exponential-backoff retries
+- [x] Reconciliation job for lost callbacks (STK Push Query)
+- [x] HMAC-signed merchant webhooks with exponential-backoff retries
 
 ## Quick start
 
@@ -117,6 +117,85 @@ Daraja doesn't sign callbacks, so anyone who can reach the endpoint could post a
 
 The token stops outsiders, the allowlist limits the damage if a token leaks, and the query means that even a callback which passes both can't settle a payment with the wrong amount or a fake receipt.
 
+## Reconciliation
+
+Sometimes Daraja's callback never arrives: the customer paid, but PayBridge wasn't told. A BullMQ repeatable job runs every minute and finds `PENDING` payments that haven't changed for 2 minutes. For each one it asks Daraja with STK Push Query and applies the answer through the same forward-only transition as a callback (`payment_events` records it as `reconciled`).
+
+- If Daraja says the payment is still processing, it stays `PENDING` and goes to the back of the queue. At most 50 payments are checked per run.
+- A callback and reconciliation can race, and the job can run on two instances or run again after a crash. The conditional `UPDATE … WHERE status IN ('CREATED', 'PENDING')` lets exactly one of them settle the payment.
+- A payment whose STK push outcome was unknown has no `CheckoutRequestID`, so it can't be queried. It waits for its callback rather than being marked failed, because the customer may have paid.
+- The job is registered with `upsertJobScheduler`, so every instance can register it on start-up and it still runs once a minute in total.
+
+## Webhooks
+
+When a payment reaches a final status, PayBridge POSTs it to the merchant's endpoint. Set the endpoint with an access token; the signing secret is shown **once**:
+
+```bash
+curl -X PUT http://localhost:3000/v1/webhook-endpoint \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://duka.co.ke/webhooks/paybridge"}'
+# {"url": "https://duka.co.ke/webhooks/paybridge", "secret": "whsec_…"}
+```
+
+Calling it again replaces the URL and the secret. `GET` shows the URL and `DELETE` removes it.
+
+Each webhook looks like this:
+
+```http
+POST /webhooks/paybridge
+Content-Type: application/json
+X-PayBridge-Signature: t=1794000000,v1=<64 hex characters>
+X-PayBridge-Event-Id: evt_5f0c2a8e-1b7d-4c3e-9f6a-2d8b4e1c7a90
+
+{"id":"evt_5f0c2a8e-…","type":"payment.succeeded","created_at":"2026-11-13T09:31:02.000Z","data":{"id":"5f0c2a8e-…","status":"SUCCEEDED","amount":1500,"mpesa_receipt":"TKB4XYZ123",…}}
+```
+
+`type` is `payment.succeeded`, `payment.failed`, `payment.cancelled` or `payment.timed_out`, and `data` is the same object `GET /v1/payments/:id` returns.
+
+- **Retries.** Any response other than `2xx`, a timeout (10 seconds) or a connection error is retried after 1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours: six attempts over about 15 hours. A `2xx` stops it.
+- **Every attempt is logged** in `webhook_deliveries` with its status code or error and when the next retry is due. Merchants can see them at `GET /v1/payments/:id/webhook-deliveries`.
+- **At least once.** If PayBridge crashes after your server answered `2xx` but before it recorded that, the webhook can arrive twice. The event `id` is the same both times (one per payment), so ignore an `id` you've already processed.
+- **Redirects aren't followed**, and in production URLs must be `https` and resolve to public addresses (see Trade-offs).
+
+### Verifying the signature
+
+The signature is `HMAC-SHA256(secret, "<t>.<raw body>")` in hex. Check it against the **raw** request body (re-serialised JSON won't match), compare in constant time, and reject old timestamps so a captured request can't be replayed:
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const TOLERANCE_SECONDS = 300;
+
+export function verifySignature(secret, header, rawBody) {
+  const parts = Object.fromEntries(
+    (header ?? "").split(",").map((part) => part.trim().split("=", 2)),
+  );
+  const timestamp = Number(parts.t);
+  if (!Number.isInteger(timestamp) || !/^[0-9a-f]{64}$/.test(parts.v1 ?? "")) {
+    return false;
+  }
+
+  const expected = createHmac("sha256", secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest();
+  if (!timingSafeEqual(expected, Buffer.from(parts.v1, "hex"))) return false;
+
+  return Math.abs(Date.now() / 1000 - timestamp) <= TOLERANCE_SECONDS;
+}
+
+// Express: app.post("/webhooks/paybridge", express.raw({ type: "application/json" }), (req, res) => {
+//   if (!verifySignature(process.env.PAYBRIDGE_WEBHOOK_SECRET, req.get("X-PayBridge-Signature"), req.body.toString("utf8"))) {
+//     return res.sendStatus(400);
+//   }
+//   const event = JSON.parse(req.body);
+//   // ...mark the order paid if you haven't seen event.id before...
+//   res.sendStatus(200);
+// });
+```
+
+Answer `2xx` quickly and do slow work afterwards; anything that takes over 10 seconds counts as a failure and is retried.
+
 ## Project structure
 
 ```
@@ -131,7 +210,9 @@ src/
   openapi.ts        # OpenAPI document (/openapi.json) and Swagger UI (/docs)
   auth/             # Passwords, access/refresh tokens, API keys
   mpesa/            # Daraja client (OAuth, STK push, STK query), phone normalisation
-  payments/         # Payment creation, state transitions, idempotency keys
+  payments/         # Payment creation, state transitions, idempotency keys, reconciliation
+  webhooks/         # Signing, secret encryption, SSRF-safe delivery
+  jobs/             # BullMQ queues and workers (webhooks, every-minute maintenance)
   rate-limit/       # Sliding-window limiter (Lua) and the configured limits
   routes/           # HTTP routes with zod request/response schemas
 drizzle/            # Generated SQL migrations (committed)
@@ -173,6 +254,15 @@ Decisions and the reasons for them. This section grows as features land.
 - **Cursor pagination over `(created_at, id)`.** Offsets get slow and skip or repeat rows when new payments arrive between pages; a keyset cursor doesn't. The cursor holds `created_at` as Postgres prints it, to the microsecond, because a JS `Date` keeps only milliseconds and would lose rows created within the same millisecond.
 - **Fastify over Express.** It has schema-based validation and serialisation built in, and OpenAPI generation comes from the same schemas.
 - **zod schemas are the single source of truth for each route.** The same schema validates the request, types the handler, filters the response (unknown fields are never serialised, so a column like `key_hash` can't leak by accident) and generates the OpenAPI document served at `/openapi.json` and `/docs`. Every route documents its request, its responses and an example payload, and a test fails if one doesn't or if the document stops being valid OpenAPI 3.1.
+- **BullMQ on the Redis we already run, not a new piece of infrastructure.** Delayed jobs, retries with custom backoff, repeatable jobs and stalled-job recovery come built in. A Postgres-only queue (`SELECT … FOR UPDATE SKIP LOCKED`) would also work and would make queueing transactional, but it means writing the scheduling and backoff by hand.
+- **Workers run inside the API process.** On a single free-tier instance there's nowhere else to run them. `RUN_WORKERS=false` turns them off, so a separate worker service could take over without code changes.
+- **Webhooks are queued after the payment's transaction commits, and a sweep covers the gap.** If the process dies between the commit and the queue, the every-minute job finds final payments from the last hour that have no delivery logged and queues them. The job id is derived from the payment (`payment-<id>`), so queueing twice is a no-op and a merchant gets one webhook per payment, not one per path that noticed it.
+- **Delivery is at least once, not exactly once.** Exactly once isn't possible over HTTP: if the merchant's `2xx` is lost, PayBridge can't know it was processed. Before sending, a job checks whether a delivery was already logged, which closes most of the gap after a crash; a stable event `id` lets merchants close the rest.
+- **The timestamp is inside the signature.** Signing `t.body`, not just the body, means a captured webhook can't be replayed later with a fresh timestamp, and receivers can reject anything older than five minutes. Verification checks the HMAC before the timestamp and compares in constant time.
+- **Signing secrets are encrypted, not hashed.** PayBridge has to read the secret to sign each payload, so a hash won't do. It's encrypted with AES-256-GCM using a key derived (HKDF) from `WEBHOOK_ENCRYPTION_KEY`, which lives only in the environment. A database dump alone doesn't reveal any secret, and GCM's authentication tag means a tampered row fails to decrypt instead of producing a wrong secret.
+- **Webhook URLs can't reach private networks (SSRF).** Otherwise a merchant could set `http://169.254.169.254/` or an internal service as its URL and have PayBridge call it. The URL is checked when it's set, but the real check is in the socket's DNS lookup at delivery time: every resolved address must be public, so a hostname can't pass the check and then resolve to `10.0.0.5` for the connection (DNS rebinding). Redirects aren't followed for the same reason. `WEBHOOK_ALLOW_PRIVATE_URLS=true` lifts this for local development.
+- **Any non-`2xx` is retried, including `4xx`.** A `404` or `401` from a merchant is usually a deploy or config mistake that gets fixed within the retry window. Six attempts over about 15 hours is a bounded cost for that.
+- **Reconciliation waits 2 minutes and doesn't query unclear pushes.** The STK prompt times out on the phone after about a minute, so by 2 minutes Daraja has a final answer and the callback has normally arrived; waiting less would mostly duplicate callbacks. A payment with no `CheckoutRequestID` can't be queried, and marking it failed could be wrong, so it waits for its callback.
 
 ## M-Pesa (Daraja)
 

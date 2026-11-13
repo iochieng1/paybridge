@@ -1,9 +1,9 @@
-import { and, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 
 import { bearerToken } from "../auth/api-keys.js";
-import { payments } from "../db/schema.js";
+import { payments, webhookDeliveries } from "../db/schema.js";
 import { normalizePhone } from "../mpesa/phone.js";
 import {
   claimIdempotencyKey,
@@ -296,6 +296,12 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
         throw err;
       }
 
+      // A rejected push is final already; a callback can also, in theory,
+      // have settled the payment before the push response came back.
+      if (payment.status !== "CREATED" && payment.status !== "PENDING") {
+        await app.jobs.notifyPaymentFinal(payment);
+      }
+
       const status = payment.status === "FAILED" ? 502 : 202;
       const body = serializePayment(payment);
       try {
@@ -419,6 +425,99 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
           rows.length > limit && last
             ? encodeCursor(last.cursorCreatedAt, last.payment.id)
             : null,
+      };
+    },
+  );
+
+  app.get(
+    "/:id/webhook-deliveries",
+    {
+      schema: {
+        summary: "List webhook attempts for a payment",
+        description:
+          "Every attempt to deliver this payment's webhook, oldest first. A failed attempt shows when the next retry is due; retries wait 1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours.",
+        tags: ["webhooks"],
+        security: apiKeySecurity,
+        params: idParams,
+        response: {
+          200: z
+            .object({
+              data: z.array(
+                z.object({
+                  attempt: z.number().int(),
+                  status_code: z
+                    .number()
+                    .int()
+                    .nullable()
+                    .describe("null if no response arrived (e.g. a timeout)"),
+                  error: z.string().nullable(),
+                  delivered_at: z.iso.datetime().nullable(),
+                  next_retry_at: z.iso.datetime().nullable(),
+                  created_at: z.iso.datetime(),
+                }),
+              ),
+            })
+            .describe("Delivery attempts")
+            .meta({
+              example: {
+                data: [
+                  {
+                    attempt: 1,
+                    status_code: 503,
+                    error: "HTTP 503",
+                    delivered_at: null,
+                    next_retry_at: "2026-11-11T09:31:05.000Z",
+                    created_at: "2026-11-11T09:30:05.000Z",
+                  },
+                  {
+                    attempt: 2,
+                    status_code: 200,
+                    error: null,
+                    delivered_at: "2026-11-11T09:31:05.000Z",
+                    next_retry_at: null,
+                    created_at: "2026-11-11T09:31:05.000Z",
+                  },
+                ],
+              },
+            }),
+          400: validationError,
+          401: apiKeyUnauthorized,
+          404: notFound,
+          429: rateLimited,
+        },
+      },
+    },
+    async (request, reply) => {
+      const [payment] = await app.db
+        .select({ id: payments.id })
+        .from(payments)
+        .where(
+          and(
+            eq(payments.id, request.params.id),
+            eq(payments.merchantId, request.merchant.id),
+          ),
+        )
+        .limit(1);
+      if (!payment) return reply.code(404).send(notFoundBody);
+
+      const rows = await app.db
+        .select()
+        .from(webhookDeliveries)
+        .where(eq(webhookDeliveries.paymentId, payment.id))
+        .orderBy(
+          asc(webhookDeliveries.createdAt),
+          asc(webhookDeliveries.attempt),
+        );
+
+      return {
+        data: rows.map((row) => ({
+          attempt: row.attempt,
+          status_code: row.statusCode,
+          error: row.error,
+          delivered_at: row.deliveredAt?.toISOString() ?? null,
+          next_retry_at: row.nextRetryAt?.toISOString() ?? null,
+          created_at: row.createdAt.toISOString(),
+        })),
       };
     },
   );
