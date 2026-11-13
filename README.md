@@ -4,6 +4,8 @@
 
 **An M-Pesa payments gateway API that is rate-limited, idempotent, and can't double-credit a payment.**
 
+![PayBridge architecture: merchant, PayBridge and Safaricom](docs/architecture.png)
+
 <!-- TODO(#9): demo GIF here: create a payment, STK prompt on the phone, webhook arrives -->
 
 > **Live API:** _deploying soon_ · **Docs:** `/docs` (Swagger UI) · `/openapi.json`
@@ -75,17 +77,34 @@ If step 5 never happens, the every-minute reconciliation job asks Daraja about t
 
 ## Quick start
 
-Requires Node 24 (`nvm use`) and Docker.
+Requires Node 24 (`nvm use`) and Docker. On Linux, if `docker ps` says _permission denied_, run `sudo usermod -aG docker $USER` and log out and back in.
 
 ```bash
 npm install
-cp .env.example .env
+cp .env.example .env     # then fill in the Daraja sandbox credentials (below)
 docker compose up -d     # Postgres + Redis
 npm run db:migrate
 npm run dev              # http://localhost:3000/health
 ```
 
 Then open http://localhost:3000/docs for the interactive API reference.
+
+### Try the whole flow
+
+With the API running, in a second terminal:
+
+```bash
+npm run demo -- 0712345678     # your Safaricom number; optional second argument: amount (default 1)
+```
+
+The script acts as a merchant. It registers, logs in, creates an API key and starts a webhook receiver on `localhost:4000` that checks signatures. Then it creates a payment and retries it with the same `Idempotency-Key` (same payment, no second prompt). Finally it waits for the signed webhook and prints the delivery log.
+
+- **With Daraja sandbox credentials** in `.env` (free from the [Daraja portal](https://developer.safaricom.co.ke); see the smoke-test steps below), your phone gets a real PIN prompt. The sandbox moves no real money.
+- **Callbacks need a public URL.** Run `ngrok http 3000` (or `cloudflared tunnel --url http://localhost:3000`) and set `PUBLIC_BASE_URL` to its https URL. Without a tunnel, Daraja's callback can't reach you; reconciliation then settles the payment about 3 minutes later, which is a good way to see it work.
+- **Without credentials**, the push is rejected and you'll see a `payment.failed` webhook.
+- Keep `WEBHOOK_ALLOW_PRIVATE_URLS=true` locally so the API can deliver to `localhost`.
+
+`npm test` runs the full test suite against throwaway Postgres and Redis containers and a fake Daraja, so it needs Docker but no credentials.
 
 ## Authentication
 
@@ -117,6 +136,7 @@ curl -X DELETE http://localhost:3000/v1/api-keys/$KEY_ID -H "Authorization: Bear
 | `npm run db:generate`                | Generate a SQL migration after editing `src/db/schema.ts`      |
 | `npm run db:migrate`                 | Apply migrations to `DATABASE_URL`                             |
 | `npm run mpesa:smoke -- <phone>`     | Manual Daraja sandbox smoke test (see below)                   |
+| `npm run demo -- <phone>`            | Walk through the whole flow as a merchant (see Quick start)    |
 | `k6 run load/rate-limit.js`          | Load test the rate limiter (see Load testing)                  |
 | `npm run build && npm start`         | Production build; `start` applies migrations, then boots       |
 
@@ -357,11 +377,17 @@ BASE_URL=https://<your-service>.onrender.com API_KEY=pb_test_... k6 run load/rat
 `render.yaml` is a Render Blueprint that creates the web service (Docker), PostgreSQL and Key Value (Redis):
 
 1. In Render, choose **New → Blueprint** and connect this repository.
-2. When prompted, fill in the variables marked `sync: false`: the Daraja **sandbox** `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET` and `MPESA_PASSKEY`, and `PUBLIC_BASE_URL` (the service's `https://….onrender.com` URL, which Render shows once the service exists; set it and redeploy). `JWT_SECRET` and `WEBHOOK_ENCRYPTION_KEY` are generated for you.
+2. When prompted, fill in the Daraja **sandbox** `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET` and `MPESA_PASSKEY`. `JWT_SECRET` and `WEBHOOK_ENCRYPTION_KEY` are generated for you. The callback URL comes from Render's `RENDER_EXTERNAL_URL`, so `PUBLIC_BASE_URL` is only needed for a custom domain. Leave `MPESA_CALLBACK_IP_ALLOWLIST` empty unless you have Safaricom's current callback IPs.
 3. Deploy. Migrations run on start-up, and `/health` turns green once Postgres and Redis are reachable.
 4. Open `/docs` on the service URL, register a merchant, log in, create an API key, and create a payment to your own Safaricom number.
 
-The free web service sleeps when idle, so the first request after a while takes about 30 seconds while it wakes up. The reconciliation job and webhook retries pause while it sleeps and catch up when it wakes.
+Free-plan limits worth knowing:
+
+- The web service sleeps after 15 minutes without traffic, and the first request then takes about a minute to wake it. A Daraja callback can arrive while it's waking and fail; reconciliation settles that payment once the service is up. The every-minute job and webhook retries pause while it sleeps.
+- Render's free PostgreSQL expires after 30 days. Recreate it, or move to a paid plan, to keep the demo up.
+- The Key Value instance uses `maxmemoryPolicy: noeviction`, because BullMQ jobs must never be evicted. A full instance rejects new jobs instead, and the sweep queues them again later.
+
+Taking real money needs more than a config change: Safaricom's Go-Live approval for a real paybill or till, production credentials and passkey, `MPESA_ENV=production`, Safaricom's callback IPs in `MPESA_CALLBACK_IP_ALLOWLIST`, and an always-on plan. API keys are still prefixed `pb_test_`.
 
 ## License
 

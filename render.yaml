@@ -37,9 +37,8 @@ services:
         value: "174379"
       - key: MPESA_ENV
         value: sandbox
-      # The service's public URL, e.g. https://paybridge-api.onrender.com
-      - key: PUBLIC_BASE_URL
-        sync: false
+      # PUBLIC_BASE_URL (where Daraja sends callbacks) defaults to the
+      # RENDER_EXTERNAL_URL Render provides; set it only for a custom domain.
       # Optional: Safaricom's callback IPs, comma-separated (empty = any).
       - key: MPESA_CALLBACK_IP_ALLOWLIST
         sync: false
@@ -47,6 +46,8 @@ services:
   - type: keyvalue
     name: paybridge-redis
     plan: free
+    # BullMQ needs keys never evicted: an evicted job is a lost webhook.
+    maxmemoryPolicy: noeviction
     ipAllowList: [] # only reachable from services in this Render account
 
 databases:
