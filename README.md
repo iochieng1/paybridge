@@ -8,7 +8,9 @@
 
 <!-- TODO(#9): demo GIF here: create a payment, STK prompt on the phone, webhook arrives -->
 
-> **Live API:** _deploying soon_ · **Docs:** `/docs` (Swagger UI) · `/openapi.json`
+> **Live API:** [paybridge-api-1s9j.onrender.com](https://paybridge-api-1s9j.onrender.com/docs) · **Docs:** [`/docs`](https://paybridge-api-1s9j.onrender.com/docs) (Swagger UI) · [`/openapi.json`](https://paybridge-api-1s9j.onrender.com/openapi.json)
+>
+> It runs on Render's free plan, which sleeps after 15 idle minutes: the first request after that can take up to a minute while it wakes.
 
 PayBridge lets any app accept M-Pesa payments through one clean REST API. It deals with the messy parts of Safaricom's Daraja API: STK push timeouts, duplicate callbacks, unsigned webhooks and token expiry. You don't have to.
 
@@ -364,13 +366,41 @@ Run this after changing the client to check it against the real sandbox. It need
 
 ## Load testing
 
-`load/rate-limit.js` is a [k6](https://k6.io) script that sends 240 payment requests a minute on one API key against a limit of 60, with steady `/health` traffic alongside. It fails if more than 60 payments get through in the minute, if any request gets a `5xx`, or if p95 latency goes over 200 ms.
+`load/rate-limit.js` is a [k6](https://k6.io) script that sends 240 payment requests a minute on one API key against a limit of 60, with steady `/health` traffic alongside. It fails if more than 60 payments get through in the minute, if any request gets a `5xx`, or if p95 latency goes over 200 ms. The latency target is for a local run; across the internet the round trip alone is more than that.
 
 ```bash
 BASE_URL=https://<your-service>.onrender.com API_KEY=pb_test_... k6 run load/rate-limit.js
 ```
 
-<!-- TODO(#9): paste the k6 summary from a run against the deployed service here. -->
+Run against the deployed service on 16 November 2026:
+
+```
+  █ THRESHOLDS
+
+    http_req_duration{scenario:health}
+    ✗ 'p(95)<200' p(95)=1.92s
+
+    http_req_duration{scenario:payments}
+    ✗ 'p(95)<200' p(95)=3.8s
+
+    payments_allowed
+    ✓ 'count<=65' count=60
+
+    server_errors
+    ✓ 'rate==0' rate=0.00%
+
+    ✓ health is 200
+    ✓ 429 has Retry-After
+    ✓ 429 has RateLimit-Remaining: 0
+
+    payments_allowed...............: 60     0.9944/s
+    payments_limited...............: 181    2.999774/s
+    server_errors..................: 0.00%  0 out of 272
+```
+
+- **The limiter is exact.** Of 241 payment requests in the minute, exactly 60 got through and 181 got `429` with `Retry-After` and `RateLimit-Remaining: 0`. No request failed with a `5xx`, and `/health` answered `200` throughout.
+- **The latency thresholds fail, and that's expected here.** The fastest request of the run took 297 ms, so the network round trip to Render alone is over the 200 ms target. The free plan's fraction of a CPU adds to that, and payments that get through also wait for the Daraja sandbox.
+- **The first run found a bug.** One request in 268 returned `500`: the Daraja sandbox handed two pushes to the same phone, in the same second, the same `CheckoutRequestID`. Storing it hit the unique constraint after the push had gone out. Since #30 that payment is treated like an unclear push outcome (`PENDING`, settled by its callback) instead of failing. The run above is after the fix.
 
 ## Deployment
 
