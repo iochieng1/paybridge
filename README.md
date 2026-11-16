@@ -6,7 +6,9 @@
 
 ![PayBridge architecture: merchant, PayBridge and Safaricom](docs/architecture.png)
 
-<!-- TODO(#9): demo GIF here: create a payment, STK prompt on the phone, webhook arrives -->
+![Demo: a merchant creates a payment, the customer approves the M-Pesa prompt, and a signed payment.succeeded webhook arrives](docs/demo.gif)
+
+_A merchant creates a KES 1 payment in the Daraja sandbox, retries it with the same `Idempotency-Key` (no second prompt), the customer approves the PIN prompt, and a signed `payment.succeeded` webhook arrives. The phone number is masked._
 
 > **Live API:** [paybridge-api-1s9j.onrender.com](https://paybridge-api-1s9j.onrender.com/docs) · **Docs:** [`/docs`](https://paybridge-api-1s9j.onrender.com/docs) (Swagger UI) · [`/openapi.json`](https://paybridge-api-1s9j.onrender.com/openapi.json)
 >
