@@ -13,8 +13,13 @@ export const DARAJA_BASE_URLS = {
 /** Refresh the OAuth token this long before Daraja says it expires. */
 export const TOKEN_REFRESH_MARGIN_SECONDS = 60;
 
-/** Daraja's STK Push Query answer while the customer hasn't finished yet. */
+/**
+ * STK Push Query says "not finished yet" in two ways: an error response with
+ * this code, or a normal 200 response whose ResultCode is 4999 ("The
+ * transaction is still under processing"). Neither is a final result.
+ */
 const STILL_PROCESSING_ERROR_CODE = "500.001.1001";
+const STILL_PROCESSING_RESULT_CODE = 4999;
 
 export type DarajaClientOptions = {
   consumerKey: string;
@@ -369,6 +374,9 @@ export const createDarajaClient = ({
     }
 
     const data = parse(stkQueryResponse, path, res);
+    if (data.ResultCode === STILL_PROCESSING_RESULT_CODE) {
+      return { status: "pending" };
+    }
     return {
       status: "completed",
       resultCode: data.ResultCode,

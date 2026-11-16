@@ -623,6 +623,26 @@ describe("webhooks", () => {
       expect(await eventTypes(id)).toEqual(["created", "stk_push_accepted"]);
     });
 
+    it("keeps a payment PENDING when the query's ResultCode is 4999 (still processing)", async () => {
+      // Marking it FAILED here would be final: if the customer then paid, the
+      // forward-only state machine would ignore the success callback.
+      const { authorization } = await merchant();
+      const { id } = await pendingPayment(authorization);
+      await backdate(id, 180);
+      daraja.on(
+        STK_QUERY_PATH,
+        queryResult(4999, "The transaction is still under processing"),
+      );
+
+      await app.jobs.runMaintenance();
+
+      expect(await paymentRow(id)).toMatchObject({
+        status: "PENDING",
+        resultCode: null,
+      });
+      expect(await eventTypes(id)).toEqual(["created", "stk_push_accepted"]);
+    });
+
     it("is idempotent: running twice, or racing a late callback, settles once", async () => {
       const { authorization } = await merchant();
       const { id, token, checkoutRequestId } =
