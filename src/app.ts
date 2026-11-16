@@ -1,5 +1,7 @@
+import { STATUS_CODES } from "node:http";
+
 import fastifyJwt from "@fastify/jwt";
-import Fastify from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import {
   serializerCompiler,
   validatorCompiler,
@@ -84,6 +86,24 @@ export const buildApp = async (
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
+
+  // An unexpected error's message can hold SQL, query parameters (a password
+  // hash, a phone number) or an upstream response. Log it in full, but tell
+  // the client only that it failed. 4xx errors are the client's to fix, so
+  // they keep their message.
+  app.setErrorHandler((err: FastifyError, request, reply) => {
+    const status =
+      err.statusCode !== undefined && err.statusCode >= 400
+        ? err.statusCode
+        : 500;
+    if (status < 500) return reply.send(err);
+    request.log.error({ err }, "Request failed");
+    return reply.code(status).send({
+      statusCode: status,
+      error: STATUS_CODES[status] ?? "Internal Server Error",
+      message: "Something went wrong on our side. Please try again later.",
+    });
+  });
 
   const { db, sql } = createDb(config.DATABASE_URL);
   const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 2 });
