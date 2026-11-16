@@ -360,6 +360,56 @@ describe("payments", () => {
       );
       expect(pushes()).toHaveLength(1);
     });
+
+    it("keeps the payment PENDING when Daraja reuses another payment's CheckoutRequestID", async () => {
+      const { authorization } = await merchantWithApiKey(app);
+      // Daraja's IDs look like a timestamp plus the phone, so two pushes to
+      // one phone in the same second can get the same one back.
+      const checkoutRequestId = `ws_CO_${randomUUID()}`;
+      let count = 0;
+      daraja.on(STK_PUSH_PATH, () => {
+        count += 1;
+        return {
+          status: 200,
+          body: {
+            MerchantRequestID: `29115-${count}`,
+            CheckoutRequestID: checkoutRequestId,
+            ResponseCode: "0",
+            ResponseDescription: "Success. Request accepted for processing",
+            CustomerMessage: "Success. Request accepted for processing",
+          },
+        };
+      });
+
+      const first = await pay(authorization);
+      const second = await pay(authorization, { key: "reused-checkout-id" });
+
+      expect(first.json<PaymentBody>().checkout_request_id).toBe(
+        checkoutRequestId,
+      );
+      // Not a 500: the push went out, so the payment waits for its callback.
+      expect(second.statusCode).toBe(202);
+      const body = second.json<PaymentBody>();
+      expect(body).toMatchObject({
+        status: "PENDING",
+        checkout_request_id: null,
+      });
+      expect(await events(body.id)).toEqual([
+        "created",
+        "stk_push_checkout_id_conflict",
+      ]);
+      const [row] = await app.db
+        .select({ merchantRequestId: payments.merchantRequestId })
+        .from(payments)
+        .where(eq(payments.id, body.id));
+      expect(row!.merchantRequestId).toBe("29115-2");
+
+      // The response was stored, so a retry replays it without a second push.
+      const retry = await pay(authorization, { key: "reused-checkout-id" });
+      expect(retry.statusCode).toBe(202);
+      expect(retry.headers["idempotent-replayed"]).toBe("true");
+      expect(pushes()).toHaveLength(2);
+    });
   });
 
   describe("GET /v1/payments/:id", () => {

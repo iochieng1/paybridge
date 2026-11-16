@@ -4,6 +4,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
 import { paymentEvents, payments, paymentStatus } from "../db/schema.js";
+import { isUniqueViolation } from "../db/errors.js";
 import { DarajaError, type DarajaClient } from "../mpesa/daraja.js";
 import { normalizePhone } from "../mpesa/phone.js";
 
@@ -134,6 +135,12 @@ export type CreatePaymentInput = {
  * - Outcome unknown (timeout, 5xx) → PENDING without a checkout id. It is not
  *   retried, since that could prompt the customer twice; the callback (which
  *   finds the payment by its token) or reconciliation settles it.
+ * - Daraja accepts but returns a CheckoutRequestID another payment already
+ *   holds → also PENDING without a checkout id. Its IDs look like a
+ *   timestamp plus the phone number, so two pushes to one phone in the same
+ *   second can share one (seen in the sandbox under load). The push was
+ *   sent, so failing the payment would be wrong if the customer pays; and the
+ *   ID can't be stored, because STK Push Query couldn't tell the two apart.
  */
 export const createPayment = async (
   {
@@ -220,26 +227,45 @@ export const createPayment = async (
       );
     }
 
-    return await db.transaction(async (tx) => {
-      // A callback can, in theory, beat this update. Then the payment is
-      // already final: keep its status and only fill in the checkout ids.
-      const [row] = await tx
-        .update(payments)
-        .set({
-          checkoutRequestId: accepted.checkoutRequestId,
-          merchantRequestId: accepted.merchantRequestId,
-          status: sql`case when ${payments.status} = 'CREATED' then 'PENDING'::payment_status else ${payments.status} end`,
-          updatedAt: sql`now()`,
-        })
-        .where(eq(payments.id, payment.id))
-        .returning();
-      await recordEvent(tx, payment.id, "stk_push_accepted", {
-        status: row!.status,
-        checkout_request_id: accepted.checkoutRequestId,
-        merchant_request_id: accepted.merchantRequestId,
+    try {
+      return await db.transaction(async (tx) => {
+        // A callback can, in theory, beat this update. Then the payment is
+        // already final: keep its status and only fill in the checkout ids.
+        const [row] = await tx
+          .update(payments)
+          .set({
+            checkoutRequestId: accepted.checkoutRequestId,
+            merchantRequestId: accepted.merchantRequestId,
+            status: sql`case when ${payments.status} = 'CREATED' then 'PENDING'::payment_status else ${payments.status} end`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(payments.id, payment.id))
+          .returning();
+        await recordEvent(tx, payment.id, "stk_push_accepted", {
+          status: row!.status,
+          checkout_request_id: accepted.checkoutRequestId,
+          merchant_request_id: accepted.merchantRequestId,
+        });
+        return row!;
       });
-      return row!;
-    });
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      return (
+        (await transitionPayment(
+          db,
+          payment.id,
+          ["CREATED"],
+          { status: "PENDING", merchantRequestId: accepted.merchantRequestId },
+          {
+            type: "stk_push_checkout_id_conflict",
+            payload: {
+              checkout_request_id: accepted.checkoutRequestId,
+              merchant_request_id: accepted.merchantRequestId,
+            },
+          },
+        )) ?? (await loadPayment(db, payment.id))
+      );
+    }
   } catch (err) {
     if (err instanceof PaymentCreationError) throw err;
     // Daraja may have been called: the caller must not allow a blind retry.
