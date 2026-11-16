@@ -414,6 +414,24 @@ describe("Daraja client", () => {
       expect(await query()).toEqual({ status: "pending" });
     });
 
+    it("returns pending for ResultCode 4999, not a final result", async () => {
+      // Seen from the sandbox: a 200 whose result says it isn't finished.
+      daraja.on(STK_QUERY_PATH, () => ({
+        status: 200,
+        body: {
+          ResponseCode: "0",
+          ResponseDescription:
+            "The service request has been accepted successsfully",
+          MerchantRequestID: "29115-34620561-1",
+          CheckoutRequestID: "ws_CO_020120260030051234567890",
+          ResultCode: "4999",
+          ResultDesc: "The transaction is still under processing",
+        },
+      }));
+
+      expect(await query()).toEqual({ status: "pending" });
+    });
+
     it("throws a DarajaError for other errors", async () => {
       daraja.on(STK_QUERY_PATH, () => ({
         status: 400,
