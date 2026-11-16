@@ -4,7 +4,7 @@ published: false
 tags: typescript, node, postgres, fintech
 ---
 
-<!-- Draft for dev.to. Add the demo GIF before publishing. -->
+![Demo: a merchant creates a payment, the customer approves the M-Pesa prompt, and a signed payment.succeeded webhook arrives](https://raw.githubusercontent.com/iochieng1/paybridge/main/docs/demo.gif)
 
 Accepting M-Pesa in an app looks easy. You call Safaricom's Daraja API, the customer gets a PIN prompt (an "STK push"), and Daraja calls you back with the result.
 
