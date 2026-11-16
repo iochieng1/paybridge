@@ -4,7 +4,7 @@ published: false
 tags: typescript, node, postgres, fintech
 ---
 
-<!-- Draft for dev.to. Add the live URL and the demo GIF before publishing. -->
+<!-- Draft for dev.to. Add the demo GIF before publishing. -->
 
 Accepting M-Pesa in an app looks easy. You call Safaricom's Daraja API, the customer gets a PIN prompt (an "STK push"), and Daraja calls you back with the result.
 
@@ -86,4 +86,4 @@ X-PayBridge-Signature: t=1794000000,v1=<hex HMAC-SHA256(secret, "t.body")>
 - **Test against real infrastructure.** Every important guarantee here comes from Postgres or a Redis Lua script.
 - **"Unknown" is a real state.** A timeout doesn't mean failure. Leaving the payment `PENDING` and letting the callback or reconciliation decide is what keeps money correct.
 
-The code, a full trade-offs section and the OpenAPI docs are on [GitHub](https://github.com/iochieng1/paybridge). It runs against the Daraja sandbox, so you can try it without moving real money.
+The code, a full trade-offs section and the OpenAPI docs are on [GitHub](https://github.com/iochieng1/paybridge). It runs against the Daraja sandbox, so you can [try it live](https://paybridge-api-1s9j.onrender.com/docs) without moving real money.

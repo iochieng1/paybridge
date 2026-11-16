@@ -18,7 +18,7 @@ PayBridge handles all of that behind one REST endpoint:
 Stack: TypeScript · Fastify · PostgreSQL · Redis · BullMQ · Docker. It's tested against real Postgres and Redis, because the guarantees come from database constraints and locks, and mocks would test none of them.
 
 🔗 Code: github.com/iochieng1/paybridge
-📖 Try it (sandbox, no real money): [live /docs URL]
+📖 Try it (sandbox, no real money): https://paybridge-api-1s9j.onrender.com/docs
 
 What's the worst payment bug you've had to debug? 👇
 
