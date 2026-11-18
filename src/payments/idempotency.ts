@@ -8,6 +8,13 @@ import { idempotencyKeys } from "../db/schema.js";
 /** How long a key is remembered. After that it can be reused for a new request. */
 export const IDEMPOTENCY_KEY_TTL_HOURS = 24;
 
+/**
+ * A request still holding its key after this long has died: creating a
+ * payment takes at most about 40 s (two token fetches and two pushes, at
+ * Daraja's 10 s timeout each).
+ */
+export const IDEMPOTENCY_STALE_AFTER_SECONDS = 60;
+
 const expiredBefore = sql`now() - make_interval(hours => ${IDEMPOTENCY_KEY_TTL_HOURS})`;
 
 /**
@@ -33,7 +40,12 @@ export type IdempotencyClaim =
   /** The key was used for a different request body. */
   | { kind: "mismatch" }
   /** The same request is being processed right now by another call. */
-  | { kind: "in_progress" };
+  | { kind: "in_progress" }
+  /**
+   * The request that claimed the key created this payment but never saved its
+   * response (it crashed, or the save failed). Answer with the payment.
+   */
+  | { kind: "stalled"; paymentId: string };
 
 /**
  * Claims `key` for this merchant with `INSERT … ON CONFLICT DO NOTHING`.
@@ -70,6 +82,8 @@ export const claimIdempotencyKey = async (
       requestHash: idempotencyKeys.requestHash,
       responseStatus: idempotencyKeys.responseStatus,
       responseBody: idempotencyKeys.responseBody,
+      paymentId: idempotencyKeys.paymentId,
+      stale: sql<boolean>`${idempotencyKeys.createdAt} < now() - make_interval(secs => ${IDEMPOTENCY_STALE_AFTER_SECONDS})`,
     })
     .from(idempotencyKeys)
     .where(
@@ -83,7 +97,11 @@ export const claimIdempotencyKey = async (
   // Released between our insert and select; the client can simply retry.
   if (!row) return { kind: "in_progress" };
   if (row.requestHash !== requestHash) return { kind: "mismatch" };
-  if (row.responseStatus === null) return { kind: "in_progress" };
+  if (row.responseStatus === null) {
+    return row.paymentId !== null && row.stale
+      ? { kind: "stalled", paymentId: row.paymentId }
+      : { kind: "in_progress" };
+  }
   return { kind: "replay", status: row.responseStatus, body: row.responseBody };
 };
 
