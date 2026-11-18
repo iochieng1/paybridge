@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, lt, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 
 import type { Database } from "../db/client.js";
@@ -13,11 +13,89 @@ export const RECONCILE_AFTER_SECONDS = 120;
 /** Most payments checked per run, so one run can't hammer Daraja. */
 export const RECONCILE_BATCH_SIZE = 50;
 
+/**
+ * A PENDING payment with no checkout id (the push outcome was unclear) that's
+ * this old is given up on. STK prompts expire within minutes and Daraja calls
+ * back soon after, so a callback that hasn't come by now won't.
+ */
+export const RESOLVE_AFTER_SECONDS = 60 * 60;
+
+export const UNRESOLVED_RESULT_DESC =
+  "M-Pesa never confirmed whether this payment went through. Check your M-Pesa statement for the account reference before fulfilling or charging again.";
+
 export type ReconcileSummary = {
   checked: number;
   settled: number;
   stillPending: number;
+  /** Moved to UNRESOLVED: no checkout id and no callback in time. */
+  unresolved: number;
   errors: number;
+};
+
+/**
+ * Payments without a checkout id can't be queried, so if their callback never
+ * comes they'd stay PENDING forever and the merchant would never hear about
+ * them. After `resolveAfterSeconds` they move to the final UNRESOLVED status
+ * (and get a webhook). Not FAILED or TIMED_OUT: the customer may have paid.
+ */
+const resolveUnconfirmedPayments = async (
+  {
+    db,
+    log,
+    onFinal,
+  }: {
+    db: Database;
+    log: FastifyBaseLogger;
+    onFinal: (payment: Payment) => Promise<void>;
+  },
+  {
+    resolveAfterSeconds,
+    limit,
+  }: { resolveAfterSeconds: number; limit: number },
+) => {
+  const stuck = await db
+    .select({ id: payments.id })
+    .from(payments)
+    .where(
+      and(
+        eq(payments.status, "PENDING"),
+        isNull(payments.checkoutRequestId),
+        lt(
+          payments.createdAt,
+          sql`now() - make_interval(secs => ${resolveAfterSeconds})`,
+        ),
+      ),
+    )
+    .orderBy(asc(payments.createdAt))
+    .limit(limit);
+
+  let resolved = 0;
+  for (const { id } of stuck) {
+    const paymentLog = log.child({ paymentId: id });
+    try {
+      const updated = await transitionPayment(
+        db,
+        id,
+        ["PENDING"],
+        {
+          status: "UNRESOLVED",
+          resultDesc: UNRESOLVED_RESULT_DESC,
+          completedAt: new Date(),
+        },
+        { type: "unresolved", payload: { after_seconds: resolveAfterSeconds } },
+      );
+      // undefined: a callback settled it between the select and now.
+      if (!updated) continue;
+      resolved += 1;
+      paymentLog.warn(
+        "M-Pesa never confirmed this payment's outcome; marked UNRESOLVED",
+      );
+      await onFinal(updated);
+    } catch (err) {
+      paymentLog.error({ err }, "Failed to mark payment UNRESOLVED");
+    }
+  }
+  return resolved;
 };
 
 /**
@@ -27,8 +105,8 @@ export type ReconcileSummary = {
  * moment, a second worker or a re-run after a crash can't apply it twice.
  *
  * Payments without a checkout_request_id (the push outcome was unclear) can't
- * be queried and are left for their callback: marking them failed could be
- * wrong if the customer did pay.
+ * be queried. They're left for their callback, and marked UNRESOLVED if it
+ * hasn't come after `resolveAfterSeconds`.
  */
 export const reconcilePendingPayments = async (
   {
@@ -44,9 +122,19 @@ export const reconcilePendingPayments = async (
   },
   {
     staleAfterSeconds = RECONCILE_AFTER_SECONDS,
+    resolveAfterSeconds = RESOLVE_AFTER_SECONDS,
     limit = RECONCILE_BATCH_SIZE,
-  }: { staleAfterSeconds?: number; limit?: number } = {},
+  }: {
+    staleAfterSeconds?: number;
+    resolveAfterSeconds?: number;
+    limit?: number;
+  } = {},
 ): Promise<ReconcileSummary> => {
+  const unresolved = await resolveUnconfirmedPayments(
+    { db, log, onFinal },
+    { resolveAfterSeconds, limit },
+  );
+
   const stale = await db
     .select({
       id: payments.id,
@@ -70,6 +158,7 @@ export const reconcilePendingPayments = async (
     checked: stale.length,
     settled: 0,
     stillPending: 0,
+    unresolved,
     errors: 0,
   };
 

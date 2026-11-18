@@ -26,6 +26,7 @@ export const FINAL_STATUSES: PaymentStatus[] = [
   "FAILED",
   "CANCELLED",
   "TIMED_OUT",
+  "UNRESOLVED",
 ];
 
 /**
