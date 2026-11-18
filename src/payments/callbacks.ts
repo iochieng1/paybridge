@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
 import { isUniqueViolation } from "../db/errors.js";
@@ -42,6 +42,25 @@ export const findPaymentByCallbackToken = async (
   return row;
 };
 
+/** Another payment's id, if it already holds this CheckoutRequestID. */
+const otherPaymentWithCheckoutId = async (
+  db: Database,
+  paymentId: string,
+  checkoutRequestId: string,
+) => {
+  const [row] = await db
+    .select({ id: payments.id })
+    .from(payments)
+    .where(
+      and(
+        eq(payments.checkoutRequestId, checkoutRequestId),
+        ne(payments.id, paymentId),
+      ),
+    )
+    .limit(1);
+  return row?.id;
+};
+
 export type CallbackOutcome =
   /** The payment moved to its final status. */
   | { kind: "applied"; payment: Payment; verifiedByQuery: boolean }
@@ -50,7 +69,13 @@ export type CallbackOutcome =
   /** Suspicious, and STK Push Query says the payment is still in progress. */
   | { kind: "unverified"; problems: string[] }
   /** Suspicious, and STK Push Query couldn't be reached. Nothing changed. */
-  | { kind: "verification_failed"; problems: string[]; error: DarajaError };
+  | { kind: "verification_failed"; problems: string[]; error: DarajaError }
+  /**
+   * Suspicious, and the query can't be tied to this payment, because another
+   * payment holds the same CheckoutRequestID. Nothing changed; the event log
+   * keeps what both sides said.
+   */
+  | { kind: "ambiguous"; problems: string[] };
 
 const metadataOf = (callback: StkCallback) =>
   Object.fromEntries(
@@ -161,26 +186,73 @@ export const applyStkCallback = async (
     return { kind: "unverified", problems };
   }
 
-  const updated = await transitionPayment(
-    db,
-    payment.id,
-    OPEN_STATUSES,
-    {
-      status: statusForResultCode(result.resultCode),
-      resultCode: result.resultCode,
-      resultDesc: result.resultDesc,
-      checkoutRequestId,
-      completedAt: new Date(),
-    },
-    {
-      type: "callback_verified_by_query",
+  // A payment without a checkout id takes the callback's, once the query has
+  // confirmed it. But Daraja can give two pushes to one phone in the same
+  // second the same CheckoutRequestID: then another payment already holds it,
+  // it can't be stored here, and the query may be answering about the other
+  // push. Each push still gets its own MerchantRequestID, so the result only
+  // counts if the query's matches this payment's.
+  const adoptsCheckoutId = payment.checkoutRequestId === null;
+  const sharedWith = adoptsCheckoutId
+    ? await otherPaymentWithCheckoutId(db, payment.id, checkoutRequestId)
+    : undefined;
+
+  const ambiguous = async (reason: string) => {
+    problems.push(reason);
+    await db.insert(paymentEvents).values({
+      paymentId: payment.id,
+      type: "callback_ambiguous",
       payload: {
         problems,
-        result_code: result.resultCode,
-        result_desc: result.resultDesc,
+        checkout_request_id: checkoutRequestId,
+        shared_with_payment_id: sharedWith ?? null,
+        query_merchant_request_id: result.merchantRequestId,
+        query_result_code: result.resultCode,
+        callback_result_code: callback.ResultCode,
+        callback_mpesa_receipt: metadataOf(callback).MpesaReceiptNumber ?? null,
       },
-    },
-  );
+    });
+    return { kind: "ambiguous", problems } as const;
+  };
+
+  if (
+    sharedWith &&
+    (payment.merchantRequestId === null ||
+      result.merchantRequestId !== payment.merchantRequestId)
+  ) {
+    return ambiguous(
+      "CheckoutRequestID belongs to another payment and the query can't tell them apart",
+    );
+  }
+
+  let updated;
+  try {
+    updated = await transitionPayment(
+      db,
+      payment.id,
+      OPEN_STATUSES,
+      {
+        status: statusForResultCode(result.resultCode),
+        resultCode: result.resultCode,
+        resultDesc: result.resultDesc,
+        ...(adoptsCheckoutId && !sharedWith && { checkoutRequestId }),
+        completedAt: new Date(),
+      },
+      {
+        type: "callback_verified_by_query",
+        payload: {
+          problems,
+          result_code: result.resultCode,
+          result_desc: result.resultDesc,
+          ...(sharedWith && { shared_checkout_request_id: checkoutRequestId }),
+        },
+      },
+    );
+  } catch (err) {
+    // Another payment took the checkout id between the check and the update.
+    if (!isUniqueViolation(err)) throw err;
+    return ambiguous("CheckoutRequestID was taken by another payment");
+  }
   return updated
     ? { kind: "applied", payment: updated, verifiedByQuery: true }
     : { kind: "ignored" };
