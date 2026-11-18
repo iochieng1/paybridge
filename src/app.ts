@@ -15,10 +15,10 @@ import type { Config } from "./config.js";
 import { createDb, type Database } from "./db/client.js";
 import { createJobs, type Jobs } from "./jobs/jobs.js";
 import {
-  createDarajaClient,
-  DARAJA_BASE_URLS,
-  type DarajaClient,
-} from "./mpesa/daraja.js";
+  createDarajaClients,
+  type DarajaClients,
+} from "./mpesa/credentials.js";
+import { createDarajaClient, DARAJA_BASE_URLS } from "./mpesa/daraja.js";
 import { registerOpenApi } from "./openapi.js";
 import { purgeExpiredIdempotencyKeys } from "./payments/idempotency.js";
 import { globalLimit } from "./rate-limit/limits.js";
@@ -28,9 +28,13 @@ import authRoutes, { ACCESS_TOKEN_TTL_SECONDS } from "./routes/auth.js";
 import callbackRoutes from "./routes/callbacks.js";
 import healthRoutes from "./routes/health.js";
 import merchantRoutes from "./routes/merchants.js";
+import mpesaCredentialsRoutes from "./routes/mpesa-credentials.js";
 import paymentRoutes from "./routes/payments.js";
 import webhookEndpointRoutes from "./routes/webhook-endpoint.js";
-import { deriveEncryptionKey } from "./webhooks/secrets.js";
+import {
+  deriveEncryptionKey,
+  MPESA_CREDENTIALS_KEY_LABEL,
+} from "./webhooks/secrets.js";
 
 /** How often expired idempotency keys are deleted. */
 const IDEMPOTENCY_PURGE_INTERVAL_MS = 60 * 60 * 1000;
@@ -40,7 +44,8 @@ declare module "fastify" {
     config: Config;
     db: Database;
     redis: Redis;
-    daraja: DarajaClient;
+    /** Daraja clients: per merchant, or PayBridge's own as `platform`. */
+    mpesa: DarajaClients;
     jobs: Jobs;
     webhookEncryptionKey: Buffer;
   }
@@ -111,15 +116,25 @@ export const buildApp = async (
   app.decorate("config", config);
   app.decorate("db", db);
   app.decorate("redis", redis);
+  const baseUrl = darajaBaseUrl ?? DARAJA_BASE_URLS[config.MPESA_ENV];
   app.decorate(
-    "daraja",
-    createDarajaClient({
-      consumerKey: config.MPESA_CONSUMER_KEY,
-      consumerSecret: config.MPESA_CONSUMER_SECRET,
-      shortcode: config.MPESA_SHORTCODE,
-      passkey: config.MPESA_PASSKEY,
-      baseUrl: darajaBaseUrl ?? DARAJA_BASE_URLS[config.MPESA_ENV],
+    "mpesa",
+    createDarajaClients({
+      db,
       redis,
+      baseUrl,
+      encryptionKey: deriveEncryptionKey(
+        config.WEBHOOK_ENCRYPTION_KEY,
+        MPESA_CREDENTIALS_KEY_LABEL,
+      ),
+      platform: createDarajaClient({
+        consumerKey: config.MPESA_CONSUMER_KEY,
+        consumerSecret: config.MPESA_CONSUMER_SECRET,
+        shortcode: config.MPESA_SHORTCODE,
+        passkey: config.MPESA_PASSKEY,
+        baseUrl,
+        redis,
+      }),
     }),
   );
 
@@ -130,7 +145,7 @@ export const buildApp = async (
   const jobs = createJobs({
     redisUrl: config.REDIS_URL,
     db,
-    daraja: app.daraja,
+    darajaFor: app.mpesa.forCredentials,
     log: app.log,
     encryptionKey: webhookEncryptionKey,
     allowPrivateAddresses: config.WEBHOOK_ALLOW_PRIVATE_URLS,
@@ -181,6 +196,9 @@ export const buildApp = async (
   await app.register(apiKeyRoutes, { prefix: "/v1/api-keys" });
   await app.register(paymentRoutes, { prefix: "/v1/payments" });
   await app.register(callbackRoutes, { prefix: "/v1/callbacks" });
+  await app.register(mpesaCredentialsRoutes, {
+    prefix: "/v1/mpesa-credentials",
+  });
   await app.register(webhookEndpointRoutes, {
     prefix: "/v1/webhook-endpoint",
   });

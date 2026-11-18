@@ -23,7 +23,8 @@ const SWEEP_WINDOW_MINUTES = 60;
 export type JobsOptions = {
   redisUrl: string;
   db: Database;
-  daraja: DarajaClient;
+  /** The Daraja client for a payment's mpesa_credentials_id. */
+  darajaFor: (credentialsId: string | null) => Promise<DarajaClient>;
   log: FastifyBaseLogger;
   encryptionKey: Buffer;
   allowPrivateAddresses: boolean;
@@ -50,7 +51,7 @@ const webhookJobId = (paymentId: string) => `payment-${paymentId}`;
 export const createJobs = ({
   redisUrl,
   db,
-  daraja,
+  darajaFor,
   log,
   encryptionKey,
   allowPrivateAddresses,
@@ -135,7 +136,7 @@ export const createJobs = ({
   const runMaintenance = async () => {
     const reconciled = await reconcilePendingPayments({
       db,
-      daraja,
+      darajaFor,
       log,
       onFinal: enqueueWebhook,
     });

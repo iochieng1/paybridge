@@ -187,7 +187,7 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         summary: "Create a payment",
         description:
-          "Sends an M-Pesa STK push to the customer's phone and returns `202` with the payment `PENDING`; the final status arrives by callback. The `Idempotency-Key` header is required: a retry with the same key and body replays the first response (with `Idempotent-Replayed: true`) and never sends a second push. If M-Pesa rejects the push, the payment is `FAILED` and the response is `502`.",
+          "Sends an M-Pesa STK push to the customer's phone and returns `202` with the payment `PENDING`; the final status arrives by callback. The customer pays the merchant's own paybill or till, set with `PUT /v1/mpesa-credentials`; without one, the sandbox uses PayBridge's test shortcode and production refuses the payment. The `Idempotency-Key` header is required: a retry with the same key and body replays the first response (with `Idempotent-Replayed: true`) and never sends a second push. If M-Pesa rejects the push, the payment is `FAILED` and the response is `502`.",
         tags: ["payments"],
         security: apiKeySecurity,
         headers: idempotencyHeaders,
@@ -208,7 +208,7 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
             },
           ),
           422: errorResponse(
-            "The Idempotency-Key was already used with a different body",
+            "The Idempotency-Key was already used with a different body, or (in production) the merchant hasn't connected its M-Pesa credentials",
             {
               statusCode: 422,
               error: "Unprocessable Entity",
@@ -239,6 +239,18 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
         reference: input.reference,
         description: input.description,
       });
+
+      // Payments go to the merchant's own shortcode. PayBridge's is only a
+      // sandbox convenience: in production, money must never land in it.
+      const credentials = await app.mpesa.activeFor(merchantId);
+      if (!credentials && app.config.MPESA_ENV === "production") {
+        return reply.code(422).send({
+          statusCode: 422,
+          error: "Unprocessable Entity",
+          message:
+            "Connect your M-Pesa paybill or till with PUT /v1/mpesa-credentials before taking payments",
+        });
+      }
 
       const claim = await claimIdempotencyKey(
         app.db,
@@ -275,7 +287,8 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
         payment = await createPayment(
           {
             db: app.db,
-            daraja: app.daraja,
+            daraja: credentials?.client ?? app.mpesa.platform,
+            credentialsId: credentials?.id ?? null,
             publicBaseUrl: app.config.PUBLIC_BASE_URL,
           },
           merchantId,

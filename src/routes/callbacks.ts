@@ -123,7 +123,10 @@ const callbackRoutes: FastifyPluginAsyncZod = async (app) => {
       }
 
       const outcome = await applyStkCallback(
-        { db: app.db, daraja: app.daraja },
+        {
+          db: app.db,
+          daraja: await app.mpesa.forCredentials(payment.mpesaCredentialsId),
+        },
         payment,
         request.body.Body.stkCallback,
       );

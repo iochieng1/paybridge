@@ -24,8 +24,12 @@ const STILL_PROCESSING_RESULT_CODE = 4999;
 export type DarajaClientOptions = {
   consumerKey: string;
   consumerSecret: string;
+  /** BusinessShortCode: the paybill, or a till's store number. */
   shortcode: string;
   passkey: string;
+  /** A till takes Buy Goods payments to `tillNumber`; defaults to paybill. */
+  shortcodeType?: "paybill" | "till";
+  tillNumber?: string;
   /** Daraja origin; defaults to the sandbox. Tests point it at a fake server. */
   baseUrl?: string;
   /** Caches the OAuth token so every instance shares one. */
@@ -167,12 +171,18 @@ export const createDarajaClient = ({
   consumerSecret,
   shortcode,
   passkey,
+  shortcodeType = "paybill",
+  tillNumber,
   baseUrl = DARAJA_BASE_URLS.sandbox,
   redis,
   cachePrefix = "mpesa",
   timeoutMs = 10_000,
   now = () => new Date(),
 }: DarajaClientOptions) => {
+  if (shortcodeType === "till" && !tillNumber) {
+    throw new TypeError("A till needs its till number");
+  }
+
   // One cache entry per app (consumer key) and Daraja environment. The key
   // holds a hash, so the consumer key itself never lands in Redis.
   const tokenCacheKey = `${cachePrefix}:oauth:${createHash("sha256")
@@ -323,10 +333,13 @@ export const createDarajaClient = ({
     const path = "/mpesa/stkpush/v1/processrequest";
     const res = await authorizedPost(path, {
       ...credentials(),
-      TransactionType: "CustomerPayBillOnline",
+      TransactionType:
+        shortcodeType === "till"
+          ? "CustomerBuyGoodsOnline"
+          : "CustomerPayBillOnline",
       Amount: amount,
       PartyA: phone,
-      PartyB: shortcode,
+      PartyB: shortcodeType === "till" ? tillNumber : shortcode,
       PhoneNumber: phone,
       CallBackURL: callbackUrl,
       AccountReference: accountReference,
