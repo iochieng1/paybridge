@@ -1,7 +1,7 @@
 import { STATUS_CODES } from "node:http";
 
 import fastifyJwt from "@fastify/jwt";
-import Fastify, { type FastifyError } from "fastify";
+import Fastify, { type FastifyError, type FastifyRequest } from "fastify";
 import {
   serializerCompiler,
   validatorCompiler,
@@ -46,6 +46,24 @@ declare module "fastify" {
   }
 }
 
+/**
+ * Each payment's callback URL carries its secret token, the main proof that a
+ * callback came from Daraja. Request logs would otherwise record it, and
+ * anyone who can read the logs could then post a callback for that payment.
+ */
+export const redactUrl = (url: string) =>
+  url.replace(/^(\/v1\/callbacks\/mpesa\/)[^/?#]+/, "$1[REDACTED]");
+
+/** Fastify's default request serializer, with the URL redacted. */
+const serializeRequest = (req: FastifyRequest) => ({
+  method: req.method,
+  url: redactUrl(req.url),
+  version: req.headers["accept-version"] as string | undefined,
+  host: req.host,
+  remoteAddress: req.ip,
+  remotePort: req.socket?.remotePort,
+});
+
 export type BuildAppOptions = {
   /** Namespace for rate-limit keys in Redis; tests use a unique one per app. */
   rateLimitPrefix?: string;
@@ -80,6 +98,7 @@ export const buildApp = async (
           ? { target: "pino-pretty" }
           : undefined,
       redact: ["req.headers.authorization", "req.headers['x-api-key']"],
+      serializers: { req: serializeRequest },
       ...(logStream && { stream: logStream }),
     },
   }).withTypeProvider<ZodTypeProvider>();
