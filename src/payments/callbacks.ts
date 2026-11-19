@@ -66,6 +66,13 @@ export type CallbackOutcome =
   | { kind: "applied"; payment: Payment; verifiedByQuery: boolean }
   /** The payment was already final: a duplicate or late callback. Nothing changed. */
   | { kind: "ignored" }
+  /**
+   * The payment was marked UNRESOLVED (its outcome was never confirmed) and
+   * this callback finally reports one. The status stays UNRESOLVED, but the
+   * callback is kept as a `late_callback` event so the merchant has the
+   * receipt to reconcile against.
+   */
+  | { kind: "late_on_unresolved"; resultCode: number; receipt: string | null }
   /** Suspicious, and STK Push Query says the payment is still in progress. */
   | { kind: "unverified"; problems: string[] }
   /** Suspicious, and STK Push Query couldn't be reached. Nothing changed. */
@@ -111,6 +118,43 @@ export const callbackProblems = (payment: Payment, callback: StkCallback) => {
 };
 
 /**
+ * A callback for a payment already marked UNRESOLVED is often the only proof
+ * the customer paid, so it's recorded rather than dropped. Nothing vouches for
+ * it (the payment never had a checkout id to check it against), so it doesn't
+ * change the payment: the event is for a person to reconcile with.
+ */
+const recordLateCallback = async (
+  db: Database,
+  payment: Payment,
+  callback: StkCallback,
+): Promise<CallbackOutcome> => {
+  const metadata = metadataOf(callback);
+  const receipt =
+    typeof metadata.MpesaReceiptNumber === "string"
+      ? metadata.MpesaReceiptNumber
+      : null;
+  await db.insert(paymentEvents).values({
+    paymentId: payment.id,
+    type: "late_callback",
+    payload: {
+      verified: false,
+      checkout_request_id: callback.CheckoutRequestID,
+      merchant_request_id: callback.MerchantRequestID,
+      result_code: callback.ResultCode,
+      result_desc: callback.ResultDesc,
+      mpesa_receipt: receipt,
+      amount: metadata.Amount ?? null,
+      phone: metadata.PhoneNumber ?? null,
+    },
+  });
+  return {
+    kind: "late_on_unresolved",
+    resultCode: callback.ResultCode,
+    receipt,
+  };
+};
+
+/**
  * Applies an STK callback to its payment. The state machine only moves
  * forward: the update is `WHERE status IN ('CREATED', 'PENDING')`, so a
  * duplicate, a replay or a late callback for a final payment changes nothing
@@ -125,6 +169,8 @@ export const applyStkCallback = async (
   payment: Payment,
   callback: StkCallback,
 ): Promise<CallbackOutcome> => {
+  if (payment.status === "UNRESOLVED")
+    return recordLateCallback(db, payment, callback);
   if (!OPEN_STATUSES.includes(payment.status)) return { kind: "ignored" };
 
   const problems = callbackProblems(payment, callback);

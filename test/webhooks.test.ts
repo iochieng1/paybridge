@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { buildApp } from "../src/app.js";
@@ -767,6 +767,49 @@ describe("webhooks", () => {
         expect(
           (await eventTypes(id)).filter((type) => type === "unresolved"),
         ).toHaveLength(1);
+      });
+
+      it("keeps a callback that arrives after it was marked UNRESOLVED", async () => {
+        const { authorization } = await merchant("/late");
+        const id = await unconfirmedPayment(authorization);
+        const token = new URL(
+          (daraja.to(STK_PUSH_PATH).at(-1)!.body as { CallBackURL: string })
+            .CallBackURL,
+        ).pathname
+          .split("/")
+          .pop()!;
+        await age(id, RESOLVE_AFTER_SECONDS + 60);
+        await app.jobs.runMaintenance();
+        expect((await paymentRow(id)).status).toBe("UNRESOLVED");
+        await waitFor(() => receiver.to("/late").length === 1);
+
+        const res = await settle(token, "ws_CO_LATE");
+
+        expect(res.statusCode).toBe(200);
+        // The status doesn't move (nothing vouches for the callback) and the
+        // merchant isn't sent a second webhook...
+        expect((await paymentRow(id)).status).toBe("UNRESOLVED");
+        // ...but the callback is kept, receipt and all, for reconciliation.
+        const [late] = await app.db
+          .select()
+          .from(paymentEvents)
+          .where(eq(paymentEvents.paymentId, id))
+          .orderBy(desc(paymentEvents.id))
+          .limit(1);
+        expect(late).toMatchObject({
+          type: "late_callback",
+          payload: {
+            verified: false,
+            checkout_request_id: "ws_CO_LATE",
+            result_code: 0,
+            amount: AMOUNT,
+          },
+        });
+        expect(
+          typeof (late!.payload as { mpesa_receipt: unknown }).mpesa_receipt,
+        ).toBe("string");
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(receiver.to("/late")).toHaveLength(1);
       });
     });
   });
