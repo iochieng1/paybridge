@@ -183,6 +183,8 @@ Daraja doesn't sign callbacks, so anyone who can reach the endpoint could post a
 2. **An optional IP allowlist** (`MPESA_CALLBACK_IP_ALLOWLIST`, comma-separated). Callbacks from anywhere else get `403`, so even a leaked token (in a proxy log, say) is useless from outside Safaricom's network. It's optional because Safaricom's IPs can change and differ per environment, and a wrong list silently drops real payments. Behind a proxy it needs `TRUST_PROXY=true` to see the real client IP.
 3. **STK Push Query for anything unexpected.** If the callback's `CheckoutRequestID` isn't the payment's, a success has no receipt, the `Amount` differs from the payment, or the receipt already belongs to another payment, the callback isn't trusted. PayBridge asks Daraja directly (an authenticated call it initiates) and applies only the query's result. The callback's receipt is never stored in that case, because nothing vouches for it. If the query says the payment is still processing, nothing changes (reconciliation will catch up). If Daraja can't be reached, the callback gets `503` so it can be redelivered.
 
+   Daraja can give two pushes to one phone in the same second the same `CheckoutRequestID`, and then only the first payment can store it. For the second, the query result counts only if its `MerchantRequestID` (unique per push) is that payment's. Otherwise the query may be describing the other push, so nothing changes, the callback still gets `200`, and a `callback_ambiguous` event records what the callback and the query each said.
+
 The token stops outsiders, the allowlist limits the damage if a token leaks, and the query means that even a callback which passes both can't settle a payment with the wrong amount or a fake receipt.
 
 ## Reconciliation
