@@ -1,5 +1,5 @@
 {
-  "id": "74234653-e20d-4860-a153-45ce3fa34e5b",
+  "id": "0c91d9fe-0c6f-4299-a15f-3750cacb18a9",
   "prevId": "28e5429a-33a3-42cb-bb7c-133448851f3a",
   "version": "7",
   "dialect": "postgresql",
@@ -105,6 +105,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "payment_id": {
+          "name": "payment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "response_status": {
           "name": "response_status",
           "type": "integer",
@@ -154,6 +160,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "idempotency_keys_payment_id_payments_id_fk": {
+          "name": "idempotency_keys_payment_id_payments_id_fk",
+          "tableFrom": "idempotency_keys",
+          "tableTo": "payments",
+          "columnsFrom": [
+            "payment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -756,8 +775,7 @@
         "SUCCEEDED",
         "FAILED",
         "CANCELLED",
-        "TIMED_OUT",
-        "UNRESOLVED"
+        "TIMED_OUT"
       ]
     }
   },

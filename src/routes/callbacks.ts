@@ -123,7 +123,10 @@ const callbackRoutes: FastifyPluginAsyncZod = async (app) => {
       }
 
       const outcome = await applyStkCallback(
-        { db: app.db, daraja: app.daraja },
+        {
+          db: app.db,
+          daraja: await app.mpesa.forCredentials(payment.mpesaCredentialsId),
+        },
         payment,
         request.body.Body.stkCallback,
       );
@@ -147,6 +150,12 @@ const callbackRoutes: FastifyPluginAsyncZod = async (app) => {
           log.warn(
             { problems: outcome.problems },
             "M-Pesa callback didn't match the payment and STK Push Query says it's still pending; left unchanged",
+          );
+          return accepted;
+        case "ambiguous":
+          log.warn(
+            { problems: outcome.problems },
+            "M-Pesa callback's CheckoutRequestID is shared with another payment and couldn't be verified; left unchanged",
           );
           return accepted;
         case "verification_failed":

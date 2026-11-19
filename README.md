@@ -162,6 +162,25 @@ curl -X POST http://localhost:3000/v1/payments \
 - `GET /v1/payments/:id` returns one payment; `GET /v1/payments?status=SUCCEEDED&created_from=…&created_to=…&limit=20&cursor=…` lists them newest first. A merchant only ever sees its own payments.
 - Amounts are whole shillings from 1 to 250,000. Every status change is appended to `payment_events`.
 
+## Your own paybill or till
+
+Each merchant connects its own Daraja app and shortcode, so customers pay the merchant's paybill or till directly and the money never passes through PayBridge. This uses an access token, like the webhook endpoint:
+
+```bash
+curl -X PUT http://localhost:3000/v1/mpesa-credentials \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"shortcode": "600123", "type": "paybill", "consumer_key": "…", "consumer_secret": "…", "passkey": "…"}'
+# {"id": "…", "shortcode": "600123", "type": "paybill", "till_number": null, "consumer_key": "••••x7Qa", "created_at": "…"}
+```
+
+- **A till** is `"type": "till"` with `shortcode` set to its store (head office) number and `till_number` to the number customers pay. Its pushes use `CustomerBuyGoodsOnline` with `PartyB` set to the till number; a paybill uses `CustomerPayBillOnline` with `PartyB` set to the shortcode.
+- **Checked before saving.** PayBridge fetches an OAuth token with the consumer key and secret. If Daraja rejects them the request gets `422` and nothing is saved; if Daraja can't be reached, `502`. Daraja has no way to check a passkey without a real STK push, so a wrong passkey shows up as a rejected payment.
+- **Encrypted, never returned.** The consumer key, consumer secret and passkey are encrypted with AES-256-GCM, using a key derived with HKDF from `WEBHOOK_ENCRYPTION_KEY` under its own label, so it's never the key used for webhook secrets. `GET /v1/mpesa-credentials` shows the shortcode and the key's last 4 characters only.
+- **Replacing or removing them** (`PUT` again, or `DELETE`) marks the old set revoked instead of deleting it. Each payment records the credentials it was sent with (`payments.mpesa_credentials_id`), so a payment still open finishes against the same shortcode: its callback check and reconciliation query use those credentials.
+- **Each merchant gets its own OAuth token.** The token cache is keyed by a hash of the consumer key, and each merchant's Daraja client is cached in memory (decrypted once, up to 500).
+- **Without credentials:** in the sandbox (`MPESA_ENV=sandbox`), payments fall back to PayBridge's own credentials from the environment (the shared test shortcode `174379` by default), so the demo works without a Daraja account. In production, `POST /v1/payments` answers `422` until the merchant connects its own, so money can never land in PayBridge's shortcode.
+
 ## Callbacks
 
 Daraja reports each STK push result by POSTing to the payment's callback URL, `/v1/callbacks/mpesa/:token`.
@@ -181,9 +200,11 @@ One more final status doesn't come from M-Pesa: `UNRESOLVED`, for a payment whos
 
 Daraja doesn't sign callbacks, so anyone who can reach the endpoint could post a fake "paid". Each of these checks covers a gap the others leave:
 
-1. **A secret token per payment.** Each callback URL carries 256 random bits, generated for that payment and sent only to Daraja. Only its SHA-256 hash is stored, so a database leak doesn't reveal working URLs. An unknown token gets `404`. A guessable URL, such as one built from the payment id, would let anyone settle any payment. With a token, a forger would have to see the URL first.
+1. **A secret token per payment.** Each callback URL carries 256 random bits, generated for that payment and sent only to Daraja. Only its SHA-256 hash is stored, so a database leak doesn't reveal working URLs. An unknown token gets `404`. A guessable URL, such as one built from the payment id, would let anyone settle any payment. With a token, a forger would have to see the URL first. PayBridge's own request logs show the path as `/v1/callbacks/mpesa/[REDACTED]`, so reading the logs doesn't reveal it either.
 2. **An optional IP allowlist** (`MPESA_CALLBACK_IP_ALLOWLIST`, comma-separated). Callbacks from anywhere else get `403`, so even a leaked token (in a proxy log, say) is useless from outside Safaricom's network. It's optional because Safaricom's IPs can change and differ per environment, and a wrong list silently drops real payments. Behind a proxy it needs `TRUST_PROXY=true` to see the real client IP.
 3. **STK Push Query for anything unexpected.** If the callback's `CheckoutRequestID` isn't the payment's, a success has no receipt, the `Amount` differs from the payment, or the receipt already belongs to another payment, the callback isn't trusted. PayBridge asks Daraja directly (an authenticated call it initiates) and applies only the query's result. The callback's receipt is never stored in that case, because nothing vouches for it. If the query says the payment is still processing, nothing changes (reconciliation will catch up). If Daraja can't be reached, the callback gets `503` so it can be redelivered.
+
+   Daraja can give two pushes to one phone in the same second the same `CheckoutRequestID`, and then only the first payment can store it. For the second, the query result counts only if its `MerchantRequestID` (unique per push) is that payment's. Otherwise the query may be describing the other push, so nothing changes, the callback still gets `200`, and a `callback_ambiguous` event records what the callback and the query each said.
 
 The token stops outsiders, the allowlist limits the damage if a token leaks, and the query means that even a callback which passes both can't settle a payment with the wrong amount or a fake receipt.
 
@@ -279,7 +300,7 @@ src/
     migrate.ts      # Migration runner
   openapi.ts        # OpenAPI document (/openapi.json) and Swagger UI (/docs)
   auth/             # Passwords, access/refresh tokens, API keys
-  mpesa/            # Daraja client (OAuth, STK push, STK query), phone normalisation
+  mpesa/            # Daraja client (OAuth, STK push, STK query), per-merchant credentials, phone normalisation
   payments/         # Payment creation, state transitions, idempotency keys, reconciliation
   webhooks/         # Signing, secret encryption, SSRF-safe delivery
   jobs/             # BullMQ queues and workers (webhooks, every-minute maintenance)
@@ -318,7 +339,8 @@ Decisions and the reasons for them. This section grows as features land.
 - **Daraja calls aren't retried, apart from one retry after a rejected token.** Retrying an STK push after a timeout could prompt the customer twice. Whether a push went through is answered later by the callback or STK Push Query, not by guessing.
 - **Idempotency keys are claimed with `INSERT … ON CONFLICT DO NOTHING`.** The primary key is `(merchant_id, key)`, so of any number of concurrent requests with the same key, Postgres lets exactly one insert through. Only that one sends the STK push; the rest get `409` while it runs and a replay of its stored response afterwards. Checking first and inserting after would let two requests both see "no key" and both charge the customer. The key also stores a SHA-256 of the request (phone normalised, field order ignored), so reusing a key for a different payment is caught (`422`) instead of silently returning the wrong payment.
 - **`409` while in progress, rather than waiting.** Holding the duplicate request open until the first finishes would tie up a connection for as long as Daraja takes. A `409` with `Retry-After` is cheap, and the retry gets the stored response.
-- **A key stays claimed if the push may have been sent.** If anything fails after Daraja was called, the key is not released: a retry with the same key gets `409` until the key expires. That's annoying but recoverable (use a new key after checking the payment); releasing it could charge the customer twice. Failures before the call release the key so the client can simply retry.
+- **A key stays claimed if the push may have been sent.** If anything fails after Daraja was called, the key is not released, because releasing it could charge the customer twice. Failures before the call release the key so the client can simply retry.
+- **A request that dies after creating its payment doesn't block its key for 24 hours.** The key records the payment's id in the same transaction that creates the payment. If the request crashes or can't save its response, retries get `409` for a minute (longer than a payment can take to create), and after that they get the payment as it is now, with `Idempotent-Replayed: true`. That answer is then stored, so later retries replay it. No second push is ever sent.
 - **An unclear STK push result is left `PENDING`, not marked failed.** A timeout, network error or 5xx without an error code doesn't say whether the customer was prompted. Marking it `FAILED` would be wrong if they then pay, so the payment stays `PENDING` and the callback (found by its token, which doesn't need a checkout id) or reconciliation settles it. Only a definite rejection (a Daraja error code or a 4xx) is `FAILED`.
 - **Expired keys are purged hourly and ignored on lookup.** A key older than 24 hours is deleted before it's claimed again, so expiry is exact even between purges; the hourly job only keeps the table small.
 - **Cursor pagination over `(created_at, id)`.** Offsets get slow and skip or repeat rows when new payments arrive between pages; a keyset cursor doesn't. The cursor holds `created_at` as Postgres prints it, to the microsecond, because a JS `Date` keeps only milliseconds and would lose rows created within the same millisecond.
@@ -336,12 +358,12 @@ Decisions and the reasons for them. This section grows as features land.
 
 ## M-Pesa (Daraja)
 
-`src/mpesa/daraja.ts` is a typed client for Safaricom's Daraja API. It is configured only through environment variables (see `.env.example`):
+`src/mpesa/daraja.ts` is a typed client for Safaricom's Daraja API. Merchants' own credentials come from the API (see [Your own paybill or till](#your-own-paybill-or-till)); PayBridge's own, used for sandbox payments by merchants without any, come from environment variables (see `.env.example`):
 
 | Variable                                       | Notes                                                                   |
 | ---------------------------------------------- | ----------------------------------------------------------------------- |
 | `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` | From your app on the [Daraja portal](https://developer.safaricom.co.ke) |
-| `MPESA_SHORTCODE`                              | Paybill/till number; the shared sandbox one is `174379` (default)       |
+| `MPESA_SHORTCODE`                              | Paybill number; the shared sandbox one is `174379` (default)            |
 | `MPESA_PASSKEY`                                | Lipa na M-Pesa Online passkey for the shortcode                         |
 | `MPESA_ENV`                                    | `sandbox` (default) or `production`                                     |
 | `PUBLIC_BASE_URL`                              | Public HTTPS origin Daraja sends STK callbacks to                       |
@@ -421,7 +443,7 @@ Free-plan limits worth knowing:
 - Render's free PostgreSQL expires after 30 days. Recreate it, or move to a paid plan, to keep the demo up.
 - The Key Value instance uses `maxmemoryPolicy: noeviction`, because BullMQ jobs must never be evicted. A full instance rejects new jobs instead, and the sweep queues them again later.
 
-Taking real money needs more than a config change: Safaricom's Go-Live approval for a real paybill or till, production credentials and passkey, `MPESA_ENV=production`, Safaricom's callback IPs in `MPESA_CALLBACK_IP_ALLOWLIST`, and an always-on plan. API keys are still prefixed `pb_test_`.
+Taking real money needs more than a config change: `MPESA_ENV=production`, Safaricom's callback IPs in `MPESA_CALLBACK_IP_ALLOWLIST`, and an always-on plan. Each merchant then connects its own paybill or till, which needs Safaricom's Go-Live approval and production credentials. API keys are still prefixed `pb_test_`, and one deployment is either sandbox or production; separate test and live modes are #22.
 
 ## License
 

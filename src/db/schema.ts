@@ -28,6 +28,11 @@ export const paymentStatus = pgEnum("payment_status", [
   "UNRESOLVED",
 ]);
 
+export const mpesaShortcodeType = pgEnum("mpesa_shortcode_type", [
+  "paybill",
+  "till",
+]);
+
 export const merchants = pgTable(
   "merchants",
   {
@@ -90,6 +95,11 @@ export const payments = pgTable(
     mpesaReceipt: text("mpesa_receipt").unique(),
     resultCode: integer("result_code"),
     resultDesc: text("result_desc"),
+    // The merchant's credentials it was sent with; null means PayBridge's own
+    // (sandbox only). Its STK Push Query must use the same ones.
+    mpesaCredentialsId: uuid("mpesa_credentials_id").references(
+      () => mpesaCredentials.id,
+    ),
     // SHA-256 of the secret token in this payment's callback URL.
     callbackTokenHash: text("callback_token_hash").unique(),
     createdAt: createdAt(),
@@ -105,6 +115,45 @@ export const payments = pgTable(
     index("payments_pending_idx")
       .on(t.updatedAt)
       .where(sql`${t.status} = 'PENDING'`),
+  ],
+);
+
+/**
+ * A merchant's own Daraja app and shortcode, so payments land in the
+ * merchant's paybill or till. Replacing or removing them sets revoked_at
+ * instead of deleting: payments still open keep using the credentials they
+ * were created with.
+ */
+export const mpesaCredentials = pgTable(
+  "mpesa_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    merchantId: uuid("merchant_id")
+      .notNull()
+      .references(() => merchants.id),
+    // The BusinessShortCode: the paybill, or a till's store number.
+    shortcode: text("shortcode").notNull(),
+    shortcodeType: mpesaShortcodeType("shortcode_type").notNull(),
+    // Where the customer pays (PartyB) for a till; null for a paybill.
+    tillNumber: text("till_number"),
+    // AES-256-GCM, like webhook secrets: they must be readable to call Daraja.
+    consumerKeyEncrypted: text("consumer_key_encrypted").notNull(),
+    consumerSecretEncrypted: text("consumer_secret_encrypted").notNull(),
+    passkeyEncrypted: text("passkey_encrypted").notNull(),
+    // Shown masked in the API so merchants can tell which app is connected.
+    consumerKeyLast4: text("consumer_key_last4").notNull(),
+    createdAt: createdAt(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    // At most one set in use per merchant.
+    uniqueIndex("mpesa_credentials_active_idx")
+      .on(t.merchantId)
+      .where(sql`${t.revokedAt} is null`),
+    check(
+      "mpesa_credentials_till_number",
+      sql`(${t.shortcodeType} = 'till') = (${t.tillNumber} is not null)`,
+    ),
   ],
 );
 
@@ -131,6 +180,9 @@ export const idempotencyKeys = pgTable(
       .references(() => merchants.id, { onDelete: "cascade" }),
     key: text("key").notNull(),
     requestHash: text("request_hash").notNull(),
+    // Set in the same transaction that creates the payment, so a request that
+    // dies before saving its response can still be answered with the payment.
+    paymentId: uuid("payment_id").references(() => payments.id),
     responseStatus: integer("response_status"),
     responseBody: jsonb("response_body"),
     createdAt: createdAt(),

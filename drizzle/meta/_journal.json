@@ -19,8 +19,22 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1795002408161,
-      "tag": "0002_payment_status_unresolved",
+      "when": 1795002965326,
+      "tag": "0002_idempotency_key_payment",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795078919401,
+      "tag": "0003_mpesa_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795079154771,
+      "tag": "0004_payment_status_unresolved",
       "breakpoints": true
     }
   ]

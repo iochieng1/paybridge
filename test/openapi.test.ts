@@ -77,6 +77,7 @@ describe("OpenAPI", () => {
       "/v1/auth/register",
       "/v1/callbacks/mpesa/{token}",
       "/v1/merchants/me",
+      "/v1/mpesa-credentials",
       "/v1/payments",
       "/v1/payments/{id}",
       "/v1/payments/{id}/webhook-deliveries",

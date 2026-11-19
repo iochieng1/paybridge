@@ -187,7 +187,7 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         summary: "Create a payment",
         description:
-          "Sends an M-Pesa STK push to the customer's phone and returns `202` with the payment `PENDING`; the final status arrives by callback. The `Idempotency-Key` header is required: a retry with the same key and body replays the first response (with `Idempotent-Replayed: true`) and never sends a second push. If M-Pesa rejects the push, the payment is `FAILED` and the response is `502`.",
+          "Sends an M-Pesa STK push to the customer's phone and returns `202` with the payment `PENDING`; the final status arrives by callback. The customer pays the merchant's own paybill or till, set with `PUT /v1/mpesa-credentials`; without one, the sandbox uses PayBridge's test shortcode and production refuses the payment. The `Idempotency-Key` header is required: a retry with the same key and body replays the first response (with `Idempotent-Replayed: true`) and never sends a second push. If M-Pesa rejects the push, the payment is `FAILED` and the response is `502`.",
         tags: ["payments"],
         security: apiKeySecurity,
         headers: idempotencyHeaders,
@@ -208,7 +208,7 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
             },
           ),
           422: errorResponse(
-            "The Idempotency-Key was already used with a different body",
+            "The Idempotency-Key was already used with a different body, or (in production) the merchant hasn't connected its M-Pesa credentials",
             {
               statusCode: 422,
               error: "Unprocessable Entity",
@@ -240,6 +240,18 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
         description: input.description,
       });
 
+      // Payments go to the merchant's own shortcode. PayBridge's is only a
+      // sandbox convenience: in production, money must never land in it.
+      const credentials = await app.mpesa.activeFor(merchantId);
+      if (!credentials && app.config.MPESA_ENV === "production") {
+        return reply.code(422).send({
+          statusCode: 422,
+          error: "Unprocessable Entity",
+          message:
+            "Connect your M-Pesa paybill or till with PUT /v1/mpesa-credentials before taking payments",
+        });
+      }
+
       const claim = await claimIdempotencyKey(
         app.db,
         merchantId,
@@ -260,6 +272,29 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
             "Idempotency-Key was already used with a different request body",
         });
       }
+      if (claim.kind === "stalled") {
+        // The payment exists and its push may have gone out, so answer with
+        // it as it is now, and store that for later retries.
+        const [payment] = await app.db
+          .select()
+          .from(payments)
+          .where(
+            and(
+              eq(payments.id, claim.paymentId),
+              eq(payments.merchantId, merchantId),
+            ),
+          )
+          .limit(1);
+        const status = payment!.status === "FAILED" ? 502 : 202;
+        const body = serializePayment(payment!);
+        await saveIdempotentResponse(app.db, merchantId, key, status, body);
+        request.log.warn(
+          { paymentId: payment!.id },
+          "Answered a retry with the payment its stalled request created",
+        );
+        reply.header("Idempotent-Replayed", "true");
+        return reply.code(status).send(body);
+      }
       if (claim.kind === "in_progress") {
         reply.header("Retry-After", 1);
         return reply.code(409).send({
@@ -275,15 +310,18 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
         payment = await createPayment(
           {
             db: app.db,
-            daraja: app.daraja,
+            daraja: credentials?.client ?? app.mpesa.platform,
+            credentialsId: credentials?.id ?? null,
             publicBaseUrl: app.config.PUBLIC_BASE_URL,
           },
           merchantId,
           input,
+          { idempotencyKey: key },
         );
       } catch (err) {
         // Before Daraja was called it's safe to let the client retry. After,
-        // the key stays claimed so a retry can't send a second push.
+        // the key stays claimed so a retry can't send a second push; once
+        // the claim is stale, a retry gets the payment instead.
         if (err instanceof PaymentCreationError && !err.pushAttempted) {
           await releaseIdempotencyKey(app.db, merchantId, key).catch(
             (releaseErr: unknown) =>
@@ -307,8 +345,8 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
       try {
         await saveIdempotentResponse(app.db, merchantId, key, status, body);
       } catch (err) {
-        // The payment exists; retries get 409 until the key expires, which
-        // is safer than letting them push again.
+        // The payment exists, so the key stays claimed rather than letting a
+        // retry push again. Once the claim is stale, a retry gets the payment.
         request.log.error(
           { err, paymentId: payment.id },
           "Failed to store idempotent response",
