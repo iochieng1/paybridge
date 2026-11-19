@@ -3,7 +3,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
-import { paymentEvents, payments, paymentStatus } from "../db/schema.js";
+import {
+  idempotencyKeys,
+  paymentEvents,
+  payments,
+  paymentStatus,
+} from "../db/schema.js";
 import { isUniqueViolation } from "../db/errors.js";
 import { DarajaError, type DarajaClient } from "../mpesa/daraja.js";
 import { normalizePhone } from "../mpesa/phone.js";
@@ -157,6 +162,7 @@ export const createPayment = async (
   },
   merchantId: string,
   input: CreatePaymentInput,
+  { idempotencyKey }: { idempotencyKey?: string } = {},
 ): Promise<Payment> => {
   const phone = normalizePhone(input.phone);
   if (!phone) throw new RangeError("phone must be a Kenyan mobile number");
@@ -182,6 +188,17 @@ export const createPayment = async (
         amount: input.amount,
         reference: input.reference,
       });
+      if (idempotencyKey !== undefined) {
+        await tx
+          .update(idempotencyKeys)
+          .set({ paymentId: row!.id })
+          .where(
+            and(
+              eq(idempotencyKeys.merchantId, merchantId),
+              eq(idempotencyKeys.key, idempotencyKey),
+            ),
+          );
+      }
       return row!;
     });
   } catch (err) {

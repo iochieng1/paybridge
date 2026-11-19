@@ -178,6 +178,9 @@ export const idempotencyKeys = pgTable(
       .references(() => merchants.id, { onDelete: "cascade" }),
     key: text("key").notNull(),
     requestHash: text("request_hash").notNull(),
+    // Set in the same transaction that creates the payment, so a request that
+    // dies before saving its response can still be answered with the payment.
+    paymentId: uuid("payment_id").references(() => payments.id),
     responseStatus: integer("response_status"),
     responseBody: jsonb("response_body"),
     createdAt: createdAt(),

@@ -5,7 +5,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { buildApp } from "../src/app.js";
 import { idempotencyKeys, paymentEvents, payments } from "../src/db/schema.js";
-import { purgeExpiredIdempotencyKeys } from "../src/payments/idempotency.js";
+import {
+  IDEMPOTENCY_STALE_AFTER_SECONDS,
+  purgeExpiredIdempotencyKeys,
+} from "../src/payments/idempotency.js";
 import { hashCallbackToken } from "../src/payments/payments.js";
 import { type Handler, startFakeDaraja, STK_PUSH_PATH } from "./fake-daraja.js";
 import { buildTestApp, merchantWithApiKey } from "./helpers.js";
@@ -562,6 +565,88 @@ describe("payments", () => {
       const res = await list(authorization, "?cursor=not-a-real-cursor");
       expect(res.statusCode).toBe(400);
       expect(res.json().message).toContain("cursor");
+    });
+  });
+
+  describe("a request that died before saving its response", () => {
+    /**
+     * A payment whose request crashed after the push: the key is still
+     * claimed, with no response, `ageSeconds` old.
+     */
+    const stalledPayment = async (ageSeconds: number) => {
+      const { authorization, merchantId } = await merchantWithApiKey(app);
+      const key = randomUUID();
+      const first = await pay(authorization, { key });
+      expect(first.statusCode).toBe(202);
+      await app.db
+        .update(idempotencyKeys)
+        .set({
+          responseStatus: null,
+          responseBody: null,
+          createdAt: sql`now() - make_interval(secs => ${ageSeconds})`,
+        })
+        .where(eq(idempotencyKeys.merchantId, merchantId));
+      return { authorization, key, id: first.json<PaymentBody>().id };
+    };
+
+    it("links the key to the payment it created", async () => {
+      const { authorization, merchantId } = await merchantWithApiKey(app);
+      const res = await pay(authorization, { key: "linked" });
+
+      const [row] = await app.db
+        .select({ paymentId: idempotencyKeys.paymentId })
+        .from(idempotencyKeys)
+        .where(eq(idempotencyKeys.merchantId, merchantId));
+      expect(row!.paymentId).toBe(res.json<PaymentBody>().id);
+    });
+
+    it("still answers 409 while the request could be running", async () => {
+      const { authorization, key } = await stalledPayment(10);
+
+      const retry = await pay(authorization, { key });
+
+      expect(retry.statusCode).toBe(409);
+      expect(pushes()).toHaveLength(1);
+    });
+
+    it("answers a retry with the payment once the claim is stale, without a second push", async () => {
+      const { authorization, key, id } = await stalledPayment(
+        IDEMPOTENCY_STALE_AFTER_SECONDS + 5,
+      );
+      // It settled in the meantime: the retry sees where it is now.
+      await app.db
+        .update(payments)
+        .set({ status: "SUCCEEDED" })
+        .where(eq(payments.id, id));
+
+      const retry = await pay(authorization, { key });
+
+      expect(retry.statusCode).toBe(202);
+      expect(retry.headers["idempotent-replayed"]).toBe("true");
+      expect(retry.json<PaymentBody>()).toMatchObject({
+        id,
+        status: "SUCCEEDED",
+      });
+      expect(pushes()).toHaveLength(1);
+
+      // That answer is stored, so later retries replay it.
+      const again = await pay(authorization, { key });
+      expect(again.statusCode).toBe(202);
+      expect(again.json<PaymentBody>().id).toBe(id);
+      expect(pushes()).toHaveLength(1);
+    });
+
+    it("still rejects a different body for that key", async () => {
+      const { authorization, key } = await stalledPayment(
+        IDEMPOTENCY_STALE_AFTER_SECONDS + 5,
+      );
+
+      const retry = await pay(authorization, {
+        key,
+        body: { ...validBody, amount: 2000 },
+      });
+
+      expect(retry.statusCode).toBe(422);
     });
   });
 

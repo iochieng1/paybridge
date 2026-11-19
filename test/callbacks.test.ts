@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Writable } from "node:stream";
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -432,6 +433,89 @@ describe("M-Pesa callbacks", () => {
         mpesaReceipt: null,
       });
     });
+
+    describe("when Daraja gave two pushes the same CheckoutRequestID", () => {
+      /** Two payments; the second couldn't store the shared checkout id. */
+      const paymentsSharingCheckoutId = async () => {
+        const shared = `ws_CO_${randomUUID()}`;
+        let count = 0;
+        daraja.on(STK_PUSH_PATH, () => {
+          count += 1;
+          return {
+            status: 200,
+            body: {
+              MerchantRequestID: `29115-shared-${count}`,
+              CheckoutRequestID: shared,
+              ResponseCode: "0",
+              ResponseDescription: "Success. Request accepted for processing",
+              CustomerMessage: "Success. Request accepted for processing",
+            },
+          };
+        });
+        const first = await pendingPayment();
+        const second = await pendingPayment();
+        expect(first.checkoutRequestId).toBe(shared);
+        expect((await paymentRow(second.id)).checkoutRequestId).toBeNull();
+        return { shared, first, second };
+      };
+
+      /** STK Push Query answering for the push with this MerchantRequestID. */
+      const queryFor =
+        (merchantRequestId: string, resultCode = 0): Handler =>
+        (request) => ({
+          status: 200,
+          body: {
+            ResponseCode: "0",
+            ResponseDescription: "The service request has been accepted",
+            MerchantRequestID: merchantRequestId,
+            CheckoutRequestID: (request.body as { CheckoutRequestID: string })
+              .CheckoutRequestID,
+            ResultCode: String(resultCode),
+            ResultDesc: "Result from query",
+          },
+        });
+
+      it("settles the payment when the query is about its own push", async () => {
+        const { shared, first, second } = await paymentsSharingCheckoutId();
+        daraja.on(STK_QUERY_PATH, queryFor("29115-shared-2", 1032));
+
+        const res = await deliver(second.token, failedCallback(shared, 1032));
+
+        expect(res.statusCode).toBe(200);
+        expect(await paymentRow(second.id)).toMatchObject({
+          status: "CANCELLED",
+          resultCode: 1032,
+          // Still the other payment's, so it isn't stored here.
+          checkoutRequestId: null,
+        });
+        expect((await paymentRow(first.id)).status).toBe("PENDING");
+        expect((await eventTypes(second.id)).at(-1)).toBe(
+          "callback_verified_by_query",
+        );
+      });
+
+      it("changes nothing when the query is about the other push", async () => {
+        const { shared, first, second } = await paymentsSharingCheckoutId();
+        daraja.on(STK_QUERY_PATH, queryFor("29115-shared-1"));
+
+        const res = await deliver(second.token, successCallback(shared));
+
+        // Not a 500 that Daraja would redeliver forever.
+        expect(res.statusCode).toBe(200);
+        expect(await paymentRow(second.id)).toMatchObject({
+          status: "PENDING",
+          checkoutRequestId: null,
+          mpesaReceipt: null,
+        });
+        expect((await paymentRow(first.id)).status).toBe("PENDING");
+        expect((await eventTypes(second.id)).at(-1)).toBe("callback_ambiguous");
+
+        // A redelivery is acknowledged the same way.
+        expect(
+          (await deliver(second.token, successCallback(shared))).statusCode,
+        ).toBe(200);
+      });
+    });
   });
 
   describe("IP allowlist", () => {
@@ -465,5 +549,60 @@ describe("M-Pesa callbacks", () => {
       expect(allowed.statusCode).toBe(200);
       expect((await paymentRow(id)).status).toBe("SUCCEEDED");
     });
+  });
+});
+
+describe("callback logging", () => {
+  it("never writes a callback token to the logs", async () => {
+    const lines: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        lines.push(chunk.toString());
+        callback();
+      },
+    });
+    const daraja = await startFakeDaraja();
+    daraja.on(STK_PUSH_PATH, acceptPushes);
+    const app = await buildTestApp(
+      { LOG_LEVEL: "info" },
+      { darajaBaseUrl: daraja.baseUrl, logStream },
+    );
+    try {
+      const { authorization } = await merchantWithApiKey(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/v1/payments",
+        headers: { authorization, "idempotency-key": randomUUID() },
+        payload: {
+          phone: "0712345678",
+          amount: AMOUNT,
+          reference: "INV-1",
+          description: "Order 1",
+        },
+      });
+      const { checkout_request_id: checkoutRequestId } = created.json<{
+        checkout_request_id: string;
+      }>();
+      const callbackUrl = new URL(
+        (daraja.to(STK_PUSH_PATH).at(-1)!.body as { CallBackURL: string })
+          .CallBackURL,
+      );
+      const token = callbackUrl.pathname.split("/").pop()!;
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/v1/callbacks/mpesa/${token}?attempt=1`,
+        payload: successCallback(checkoutRequestId),
+      });
+      expect(res.statusCode).toBe(200);
+
+      const logs = lines.join("");
+      expect(logs).not.toContain(token);
+      // The request is still logged, just without its token.
+      expect(logs).toContain("/v1/callbacks/mpesa/[REDACTED]?attempt=1");
+    } finally {
+      await app.close();
+      await daraja.close();
+    }
   });
 });

@@ -1,5 +1,5 @@
 {
-  "id": "818867b1-172a-4f90-9e0a-55d4e63bb4ae",
+  "id": "0c91d9fe-0c6f-4299-a15f-3750cacb18a9",
   "prevId": "28e5429a-33a3-42cb-bb7c-133448851f3a",
   "version": "7",
   "dialect": "postgresql",
@@ -105,6 +105,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "payment_id": {
+          "name": "payment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "response_status": {
           "name": "response_status",
           "type": "integer",
@@ -154,6 +160,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "idempotency_keys_payment_id_payments_id_fk": {
+          "name": "idempotency_keys_payment_id_payments_id_fk",
+          "tableFrom": "idempotency_keys",
+          "tableTo": "payments",
+          "columnsFrom": [
+            "payment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -230,124 +249,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.mpesa_credentials": {
-      "name": "mpesa_credentials",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "merchant_id": {
-          "name": "merchant_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "shortcode": {
-          "name": "shortcode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "shortcode_type": {
-          "name": "shortcode_type",
-          "type": "mpesa_shortcode_type",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "till_number": {
-          "name": "till_number",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "consumer_key_encrypted": {
-          "name": "consumer_key_encrypted",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "consumer_secret_encrypted": {
-          "name": "consumer_secret_encrypted",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "passkey_encrypted": {
-          "name": "passkey_encrypted",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "consumer_key_last4": {
-          "name": "consumer_key_last4",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "revoked_at": {
-          "name": "revoked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "mpesa_credentials_active_idx": {
-          "name": "mpesa_credentials_active_idx",
-          "columns": [
-            {
-              "expression": "merchant_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"mpesa_credentials\".\"revoked_at\" is null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "mpesa_credentials_merchant_id_merchants_id_fk": {
-          "name": "mpesa_credentials_merchant_id_merchants_id_fk",
-          "tableFrom": "mpesa_credentials",
-          "tableTo": "merchants",
-          "columnsFrom": [
-            "merchant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "mpesa_credentials_till_number": {
-          "name": "mpesa_credentials_till_number",
-          "value": "(\"mpesa_credentials\".\"shortcode_type\" = 'till') = (\"mpesa_credentials\".\"till_number\" is not null)"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.payment_events": {
@@ -503,12 +404,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "mpesa_credentials_id": {
-          "name": "mpesa_credentials_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "callback_token_hash": {
           "name": "callback_token_hash",
           "type": "text",
@@ -582,19 +477,6 @@
           "tableTo": "merchants",
           "columnsFrom": [
             "merchant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "payments_mpesa_credentials_id_mpesa_credentials_id_fk": {
-          "name": "payments_mpesa_credentials_id_mpesa_credentials_id_fk",
-          "tableFrom": "payments",
-          "tableTo": "mpesa_credentials",
-          "columnsFrom": [
-            "mpesa_credentials_id"
           ],
           "columnsTo": [
             "id"
@@ -884,14 +766,6 @@
     }
   },
   "enums": {
-    "public.mpesa_shortcode_type": {
-      "name": "mpesa_shortcode_type",
-      "schema": "public",
-      "values": [
-        "paybill",
-        "till"
-      ]
-    },
     "public.payment_status": {
       "name": "payment_status",
       "schema": "public",

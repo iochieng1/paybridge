@@ -272,6 +272,29 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
             "Idempotency-Key was already used with a different request body",
         });
       }
+      if (claim.kind === "stalled") {
+        // The payment exists and its push may have gone out, so answer with
+        // it as it is now, and store that for later retries.
+        const [payment] = await app.db
+          .select()
+          .from(payments)
+          .where(
+            and(
+              eq(payments.id, claim.paymentId),
+              eq(payments.merchantId, merchantId),
+            ),
+          )
+          .limit(1);
+        const status = payment!.status === "FAILED" ? 502 : 202;
+        const body = serializePayment(payment!);
+        await saveIdempotentResponse(app.db, merchantId, key, status, body);
+        request.log.warn(
+          { paymentId: payment!.id },
+          "Answered a retry with the payment its stalled request created",
+        );
+        reply.header("Idempotent-Replayed", "true");
+        return reply.code(status).send(body);
+      }
       if (claim.kind === "in_progress") {
         reply.header("Retry-After", 1);
         return reply.code(409).send({
@@ -293,10 +316,12 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
           },
           merchantId,
           input,
+          { idempotencyKey: key },
         );
       } catch (err) {
         // Before Daraja was called it's safe to let the client retry. After,
-        // the key stays claimed so a retry can't send a second push.
+        // the key stays claimed so a retry can't send a second push; once
+        // the claim is stale, a retry gets the payment instead.
         if (err instanceof PaymentCreationError && !err.pushAttempted) {
           await releaseIdempotencyKey(app.db, merchantId, key).catch(
             (releaseErr: unknown) =>
@@ -320,8 +345,8 @@ const paymentRoutes: FastifyPluginAsyncZod = async (app) => {
       try {
         await saveIdempotentResponse(app.db, merchantId, key, status, body);
       } catch (err) {
-        // The payment exists; retries get 409 until the key expires, which
-        // is safer than letting them push again.
+        // The payment exists, so the key stays claimed rather than letting a
+        // retry push again. Once the claim is stale, a retry gets the payment.
         request.log.error(
           { err, paymentId: payment.id },
           "Failed to store idempotent response",

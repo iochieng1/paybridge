@@ -19,8 +19,15 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1795004618538,
-      "tag": "0002_mpesa_credentials",
+      "when": 1795002965326,
+      "tag": "0002_idempotency_key_payment",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795078919401,
+      "tag": "0003_mpesa_credentials",
       "breakpoints": true
     }
   ]

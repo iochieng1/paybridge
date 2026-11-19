@@ -152,6 +152,12 @@ const callbackRoutes: FastifyPluginAsyncZod = async (app) => {
             "M-Pesa callback didn't match the payment and STK Push Query says it's still pending; left unchanged",
           );
           return accepted;
+        case "ambiguous":
+          log.warn(
+            { problems: outcome.problems },
+            "M-Pesa callback's CheckoutRequestID is shared with another payment and couldn't be verified; left unchanged",
+          );
+          return accepted;
         case "verification_failed":
           log.error(
             { problems: outcome.problems, err: outcome.error },
