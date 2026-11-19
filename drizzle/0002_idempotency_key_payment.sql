@@ -1,0 +1,2 @@
+ALTER TABLE "idempotency_keys" ADD COLUMN "payment_id" uuid;--> statement-breakpoint
+ALTER TABLE "idempotency_keys" ADD CONSTRAINT "idempotency_keys_payment_id_payments_id_fk" FOREIGN KEY ("payment_id") REFERENCES "public"."payments"("id") ON DELETE no action ON UPDATE no action;
