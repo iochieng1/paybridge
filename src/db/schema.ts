@@ -24,6 +24,8 @@ export const paymentStatus = pgEnum("payment_status", [
   "FAILED",
   "CANCELLED",
   "TIMED_OUT",
+  // M-Pesa never confirmed how the STK push ended: see RESOLVE_AFTER_SECONDS.
+  "UNRESOLVED",
 ]);
 
 export const mpesaShortcodeType = pgEnum("mpesa_shortcode_type", [

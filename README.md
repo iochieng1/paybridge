@@ -192,6 +192,8 @@ Daraja reports each STK push result by POSTing to the payment's callback URL, `/
 | `1037`        | `TIMED_OUT` (customer didn't answer) |
 | anything else | `FAILED`                             |
 
+One more final status doesn't come from M-Pesa: `UNRESOLVED`, for a payment whose outcome M-Pesa never reported (see [Reconciliation](#reconciliation)).
+
 **The state machine only moves forward.** The update is `UPDATE … WHERE id = ? AND status IN ('CREATED', 'PENDING')`, in one transaction with its `payment_events` row. Once a payment is final, nothing changes it: a duplicate, a replay or a late "failed" after a success updates no row, records no event and still gets `200` so Daraja stops sending it. Concurrent copies of one callback race on the row lock, and exactly one wins. `mpesa_receipt` is unique across all payments.
 
 ### Why three checks, when callbacks aren't signed
@@ -212,7 +214,7 @@ Sometimes Daraja's callback never arrives: the customer paid, but PayBridge wasn
 
 - If Daraja says the payment is still processing, it stays `PENDING` and goes to the back of the queue. At most 50 payments are checked per run.
 - A callback and reconciliation can race, and the job can run on two instances or run again after a crash. The conditional `UPDATE … WHERE status IN ('CREATED', 'PENDING')` lets exactly one of them settle the payment.
-- A payment whose STK push outcome was unknown has no `CheckoutRequestID`, so it can't be queried. It waits for its callback rather than being marked failed, because the customer may have paid.
+- A payment whose STK push outcome was unknown has no `CheckoutRequestID`, so it can't be queried. It waits for its callback rather than being marked failed, because the customer may have paid. If no callback has come an hour after it was created, it moves to the final status `UNRESOLVED` (`payment_events` records it as `unresolved`) and the merchant gets a `payment.unresolved` webhook, so it isn't `PENDING` forever. Its `result_desc` tells the merchant to check their M-Pesa statement before fulfilling the order or charging again. If a callback does turn up later (Daraja retried late, or the service was asleep), it isn't dropped: the status stays `UNRESOLVED` and no second webhook goes out, but the callback, receipt number included, is kept as an unverified `late_callback` event and logged as a warning, so whoever reconciles has the receipt to look for.
 - The job is registered with `upsertJobScheduler`, so every instance can register it on start-up and it still runs once a minute in total.
 
 ## Webhooks
@@ -240,7 +242,7 @@ X-PayBridge-Event-Id: evt_5f0c2a8e-1b7d-4c3e-9f6a-2d8b4e1c7a90
 {"id":"evt_5f0c2a8e-…","type":"payment.succeeded","created_at":"2026-11-13T09:31:02.000Z","data":{"id":"5f0c2a8e-…","status":"SUCCEEDED","amount":1500,"mpesa_receipt":"TKB4XYZ123",…}}
 ```
 
-`type` is `payment.succeeded`, `payment.failed`, `payment.cancelled` or `payment.timed_out`, and `data` is the same object `GET /v1/payments/:id` returns.
+`type` is `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.timed_out` or `payment.unresolved`, and `data` is the same object `GET /v1/payments/:id` returns.
 
 - **Retries.** Any response other than `2xx`, a timeout (10 seconds) or a connection error is retried after 1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours: six attempts over about 15 hours. A `2xx` stops it.
 - **Every attempt is logged** in `webhook_deliveries` with its status code or error and when the next retry is due. Merchants can see them at `GET /v1/payments/:id/webhook-deliveries`.
@@ -352,7 +354,7 @@ Decisions and the reasons for them. This section grows as features land.
 - **Signing secrets are encrypted, not hashed.** PayBridge has to read the secret to sign each payload, so a hash won't do. It's encrypted with AES-256-GCM using a key derived (HKDF) from `WEBHOOK_ENCRYPTION_KEY`, which lives only in the environment. A database dump alone doesn't reveal any secret, and GCM's authentication tag means a tampered row fails to decrypt instead of producing a wrong secret.
 - **Webhook URLs can't reach private networks (SSRF).** Otherwise a merchant could set `http://169.254.169.254/` or an internal service as its URL and have PayBridge call it. The URL is checked when it's set, but the real check is in the socket's DNS lookup at delivery time: every resolved address must be public, so a hostname can't pass the check and then resolve to `10.0.0.5` for the connection (DNS rebinding). Redirects aren't followed for the same reason. `WEBHOOK_ALLOW_PRIVATE_URLS=true` lifts this for local development.
 - **Any non-`2xx` is retried, including `4xx`.** A `404` or `401` from a merchant is usually a deploy or config mistake that gets fixed within the retry window. Six attempts over about 15 hours is a bounded cost for that.
-- **Reconciliation waits 2 minutes and doesn't query unclear pushes.** The STK prompt times out on the phone after about a minute, so by 2 minutes Daraja has a final answer and the callback has normally arrived; waiting less would mostly duplicate callbacks. A payment with no `CheckoutRequestID` can't be queried, and marking it failed could be wrong, so it waits for its callback.
+- **Reconciliation waits 2 minutes and doesn't query unclear pushes.** The STK prompt times out on the phone after about a minute, so by 2 minutes Daraja has a final answer and the callback has normally arrived; waiting less would mostly duplicate callbacks. A payment with no `CheckoutRequestID` can't be queried, and marking it failed could be wrong, so it waits for its callback. After an hour it becomes `UNRESOLVED` instead: by then the prompt is long gone and a callback won't come, and a merchant told "we don't know" can check their statement, while one left with `PENDING` never hears anything.
 
 ## M-Pesa (Daraja)
 

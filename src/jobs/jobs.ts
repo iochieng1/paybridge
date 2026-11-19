@@ -141,7 +141,7 @@ export const createJobs = ({
       onFinal: enqueueWebhook,
     });
     const swept = await sweepMissedWebhooks();
-    if (reconciled.checked > 0 || swept > 0) {
+    if (reconciled.checked > 0 || reconciled.unresolved > 0 || swept > 0) {
       log.info({ reconciled, swept }, "Maintenance run finished");
     }
     return { reconciled, swept };

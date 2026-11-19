@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { buildApp } from "../src/app.js";
@@ -13,6 +13,10 @@ import {
   webhookEndpoints,
 } from "../src/db/schema.js";
 import { deliverPaymentWebhook } from "../src/webhooks/deliver.js";
+import {
+  RESOLVE_AFTER_SECONDS,
+  UNRESOLVED_RESULT_DESC,
+} from "../src/payments/reconcile.js";
 import { verifySignature } from "../src/webhooks/signature.js";
 import {
   type Handler,
@@ -687,5 +691,126 @@ describe("webhooks", () => {
 
       expect((await paymentRow(id)).status).toBe("PENDING");
     }, 30_000);
+
+    describe("a payment with no checkout id whose callback never comes", () => {
+      /** A PENDING payment whose push outcome was unclear (Daraja answered 503). */
+      const unconfirmedPayment = async (authorization: string) => {
+        daraja.on(STK_PUSH_PATH, () => ({ status: 503, body: "busy" }));
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/payments",
+          headers: { authorization, "idempotency-key": randomUUID() },
+          payload: {
+            phone: "0712345678",
+            amount: AMOUNT,
+            reference: "R",
+            description: "D",
+          },
+        });
+        const { id, status } = res.json<{ id: string; status: string }>();
+        expect(status).toBe("PENDING");
+        expect((await paymentRow(id)).checkoutRequestId).toBeNull();
+        return id;
+      };
+
+      const age = (id: string, seconds: number) => {
+        const at = new Date(Date.now() - seconds * 1000);
+        return app.db
+          .update(payments)
+          .set({ createdAt: at, updatedAt: at })
+          .where(eq(payments.id, id));
+      };
+
+      it("is marked UNRESOLVED after an hour, and the merchant is told", async () => {
+        const { authorization } = await merchant("/unresolved");
+        const id = await unconfirmedPayment(authorization);
+        await age(id, RESOLVE_AFTER_SECONDS + 60);
+
+        const { reconciled } = await app.jobs.runMaintenance();
+
+        expect(reconciled.unresolved).toBeGreaterThanOrEqual(1);
+        const row = await paymentRow(id);
+        expect(row).toMatchObject({
+          status: "UNRESOLVED",
+          resultCode: null,
+          resultDesc: UNRESOLVED_RESULT_DESC,
+        });
+        expect(row.completedAt).not.toBeNull();
+        expect((await eventTypes(id)).at(-1)).toBe("unresolved");
+        await waitFor(() => receiver.to("/unresolved").length === 1);
+        expect(JSON.parse(receiver.to("/unresolved")[0]!.body)).toMatchObject({
+          type: "payment.unresolved",
+          data: { id, status: "UNRESOLVED" },
+        });
+      });
+
+      it("stays PENDING within the hour", async () => {
+        const { authorization } = await merchant();
+        const id = await unconfirmedPayment(authorization);
+        await age(id, RESOLVE_AFTER_SECONDS - 60);
+
+        await app.jobs.runMaintenance();
+
+        expect((await paymentRow(id)).status).toBe("PENDING");
+      });
+
+      it("isn't marked twice when runs overlap", async () => {
+        const { authorization } = await merchant();
+        const id = await unconfirmedPayment(authorization);
+        await age(id, RESOLVE_AFTER_SECONDS + 60);
+
+        await Promise.all([
+          app.jobs.runMaintenance(),
+          app.jobs.runMaintenance(),
+        ]);
+
+        expect(
+          (await eventTypes(id)).filter((type) => type === "unresolved"),
+        ).toHaveLength(1);
+      });
+
+      it("keeps a callback that arrives after it was marked UNRESOLVED", async () => {
+        const { authorization } = await merchant("/late");
+        const id = await unconfirmedPayment(authorization);
+        const token = new URL(
+          (daraja.to(STK_PUSH_PATH).at(-1)!.body as { CallBackURL: string })
+            .CallBackURL,
+        ).pathname
+          .split("/")
+          .pop()!;
+        await age(id, RESOLVE_AFTER_SECONDS + 60);
+        await app.jobs.runMaintenance();
+        expect((await paymentRow(id)).status).toBe("UNRESOLVED");
+        await waitFor(() => receiver.to("/late").length === 1);
+
+        const res = await settle(token, "ws_CO_LATE");
+
+        expect(res.statusCode).toBe(200);
+        // The status doesn't move (nothing vouches for the callback) and the
+        // merchant isn't sent a second webhook...
+        expect((await paymentRow(id)).status).toBe("UNRESOLVED");
+        // ...but the callback is kept, receipt and all, for reconciliation.
+        const [late] = await app.db
+          .select()
+          .from(paymentEvents)
+          .where(eq(paymentEvents.paymentId, id))
+          .orderBy(desc(paymentEvents.id))
+          .limit(1);
+        expect(late).toMatchObject({
+          type: "late_callback",
+          payload: {
+            verified: false,
+            checkout_request_id: "ws_CO_LATE",
+            result_code: 0,
+            amount: AMOUNT,
+          },
+        });
+        expect(
+          typeof (late!.payload as { mpesa_receipt: unknown }).mpesa_receipt,
+        ).toBe("string");
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(receiver.to("/late")).toHaveLength(1);
+      });
+    });
   });
 });

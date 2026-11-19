@@ -146,6 +146,15 @@ const callbackRoutes: FastifyPluginAsyncZod = async (app) => {
         case "ignored":
           log.info("Ignored duplicate or late M-Pesa callback");
           return accepted;
+        case "late_on_unresolved":
+          log.warn(
+            {
+              resultCode: outcome.resultCode,
+              mpesaReceipt: outcome.receipt,
+            },
+            "M-Pesa callback arrived after the payment was marked UNRESOLVED; recorded as a late_callback event, status unchanged",
+          );
+          return accepted;
         case "unverified":
           log.warn(
             { problems: outcome.problems },
