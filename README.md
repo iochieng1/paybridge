@@ -162,6 +162,25 @@ curl -X POST http://localhost:3000/v1/payments \
 - `GET /v1/payments/:id` returns one payment; `GET /v1/payments?status=SUCCEEDED&created_from=…&created_to=…&limit=20&cursor=…` lists them newest first. A merchant only ever sees its own payments.
 - Amounts are whole shillings from 1 to 250,000. Every status change is appended to `payment_events`.
 
+## Your own paybill or till
+
+Each merchant connects its own Daraja app and shortcode, so customers pay the merchant's paybill or till directly and the money never passes through PayBridge. This uses an access token, like the webhook endpoint:
+
+```bash
+curl -X PUT http://localhost:3000/v1/mpesa-credentials \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"shortcode": "600123", "type": "paybill", "consumer_key": "…", "consumer_secret": "…", "passkey": "…"}'
+# {"id": "…", "shortcode": "600123", "type": "paybill", "till_number": null, "consumer_key": "••••x7Qa", "created_at": "…"}
+```
+
+- **A till** is `"type": "till"` with `shortcode` set to its store (head office) number and `till_number` to the number customers pay. Its pushes use `CustomerBuyGoodsOnline` with `PartyB` set to the till number; a paybill uses `CustomerPayBillOnline` with `PartyB` set to the shortcode.
+- **Checked before saving.** PayBridge fetches an OAuth token with the consumer key and secret. If Daraja rejects them the request gets `422` and nothing is saved; if Daraja can't be reached, `502`. Daraja has no way to check a passkey without a real STK push, so a wrong passkey shows up as a rejected payment.
+- **Encrypted, never returned.** The consumer key, consumer secret and passkey are encrypted with AES-256-GCM, using a key derived with HKDF from `WEBHOOK_ENCRYPTION_KEY` under its own label, so it's never the key used for webhook secrets. `GET /v1/mpesa-credentials` shows the shortcode and the key's last 4 characters only.
+- **Replacing or removing them** (`PUT` again, or `DELETE`) marks the old set revoked instead of deleting it. Each payment records the credentials it was sent with (`payments.mpesa_credentials_id`), so a payment still open finishes against the same shortcode: its callback check and reconciliation query use those credentials.
+- **Each merchant gets its own OAuth token.** The token cache is keyed by a hash of the consumer key, and each merchant's Daraja client is cached in memory (decrypted once, up to 500).
+- **Without credentials:** in the sandbox (`MPESA_ENV=sandbox`), payments fall back to PayBridge's own credentials from the environment (the shared test shortcode `174379` by default), so the demo works without a Daraja account. In production, `POST /v1/payments` answers `422` until the merchant connects its own, so money can never land in PayBridge's shortcode.
+
 ## Callbacks
 
 Daraja reports each STK push result by POSTing to the payment's callback URL, `/v1/callbacks/mpesa/:token`.
@@ -279,7 +298,7 @@ src/
     migrate.ts      # Migration runner
   openapi.ts        # OpenAPI document (/openapi.json) and Swagger UI (/docs)
   auth/             # Passwords, access/refresh tokens, API keys
-  mpesa/            # Daraja client (OAuth, STK push, STK query), phone normalisation
+  mpesa/            # Daraja client (OAuth, STK push, STK query), per-merchant credentials, phone normalisation
   payments/         # Payment creation, state transitions, idempotency keys, reconciliation
   webhooks/         # Signing, secret encryption, SSRF-safe delivery
   jobs/             # BullMQ queues and workers (webhooks, every-minute maintenance)
@@ -337,12 +356,12 @@ Decisions and the reasons for them. This section grows as features land.
 
 ## M-Pesa (Daraja)
 
-`src/mpesa/daraja.ts` is a typed client for Safaricom's Daraja API. It is configured only through environment variables (see `.env.example`):
+`src/mpesa/daraja.ts` is a typed client for Safaricom's Daraja API. Merchants' own credentials come from the API (see [Your own paybill or till](#your-own-paybill-or-till)); PayBridge's own, used for sandbox payments by merchants without any, come from environment variables (see `.env.example`):
 
 | Variable                                       | Notes                                                                   |
 | ---------------------------------------------- | ----------------------------------------------------------------------- |
 | `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` | From your app on the [Daraja portal](https://developer.safaricom.co.ke) |
-| `MPESA_SHORTCODE`                              | Paybill/till number; the shared sandbox one is `174379` (default)       |
+| `MPESA_SHORTCODE`                              | Paybill number; the shared sandbox one is `174379` (default)            |
 | `MPESA_PASSKEY`                                | Lipa na M-Pesa Online passkey for the shortcode                         |
 | `MPESA_ENV`                                    | `sandbox` (default) or `production`                                     |
 | `PUBLIC_BASE_URL`                              | Public HTTPS origin Daraja sends STK callbacks to                       |
@@ -422,7 +441,7 @@ Free-plan limits worth knowing:
 - Render's free PostgreSQL expires after 30 days. Recreate it, or move to a paid plan, to keep the demo up.
 - The Key Value instance uses `maxmemoryPolicy: noeviction`, because BullMQ jobs must never be evicted. A full instance rejects new jobs instead, and the sweep queues them again later.
 
-Taking real money needs more than a config change: Safaricom's Go-Live approval for a real paybill or till, production credentials and passkey, `MPESA_ENV=production`, Safaricom's callback IPs in `MPESA_CALLBACK_IP_ALLOWLIST`, and an always-on plan. API keys are still prefixed `pb_test_`.
+Taking real money needs more than a config change: `MPESA_ENV=production`, Safaricom's callback IPs in `MPESA_CALLBACK_IP_ALLOWLIST`, and an always-on plan. Each merchant then connects its own paybill or till, which needs Safaricom's Go-Live approval and production credentials. API keys are still prefixed `pb_test_`, and one deployment is either sandbox or production; separate test and live modes are #22.
 
 ## License
 

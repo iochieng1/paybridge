@@ -8,20 +8,17 @@ import {
 const VERSION = "v1";
 
 /**
- * Derives the AES-256 key from WEBHOOK_ENCRYPTION_KEY. HKDF with a fixed
- * label means the configured value can be any long random string, and the
- * same value used elsewhere wouldn't produce the same key.
+ * Derives an AES-256 key from WEBHOOK_ENCRYPTION_KEY. HKDF with a fixed
+ * label means the configured value can be any long random string, and each
+ * label gets its own key: webhook secrets and M-Pesa credentials never share
+ * one.
  */
-export const deriveEncryptionKey = (masterKey: string) =>
-  Buffer.from(
-    hkdfSync(
-      "sha256",
-      masterKey,
-      Buffer.alloc(0),
-      "paybridge webhook signing secrets",
-      32,
-    ),
-  );
+export const deriveEncryptionKey = (
+  masterKey: string,
+  label = "paybridge webhook signing secrets",
+) => Buffer.from(hkdfSync("sha256", masterKey, Buffer.alloc(0), label, 32));
+
+export const MPESA_CREDENTIALS_KEY_LABEL = "paybridge mpesa credentials";
 
 /** A new signing secret for a merchant: 256 random bits. */
 export const generateWebhookSecret = () =>

@@ -24,6 +24,10 @@ export const registerOpenApi = async (app: FastifyInstance) => {
         { name: "api-keys", description: "Keys for merchant servers" },
         { name: "payments", description: "M-Pesa STK push payments" },
         {
+          name: "mpesa",
+          description: "The merchant's own paybill or till, where payments go",
+        },
+        {
           name: "webhooks",
           description: "Signed notifications of final payment statuses",
         },

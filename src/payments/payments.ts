@@ -151,8 +151,15 @@ export const createPayment = async (
   {
     db,
     daraja,
+    credentialsId,
     publicBaseUrl,
-  }: { db: Database; daraja: DarajaClient; publicBaseUrl: string },
+  }: {
+    db: Database;
+    daraja: DarajaClient;
+    /** The merchant's mpesa_credentials row `daraja` uses; null for PayBridge's. */
+    credentialsId: string | null;
+    publicBaseUrl: string;
+  },
   merchantId: string,
   input: CreatePaymentInput,
   { idempotencyKey }: { idempotencyKey?: string } = {},
@@ -173,6 +180,7 @@ export const createPayment = async (
           accountReference: input.reference,
           description: input.description,
           callbackTokenHash: tokenHash,
+          mpesaCredentialsId: credentialsId,
         })
         .returning();
       await recordEvent(tx, row!.id, "created", {

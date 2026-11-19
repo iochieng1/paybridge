@@ -33,12 +33,13 @@ export type ReconcileSummary = {
 export const reconcilePendingPayments = async (
   {
     db,
-    daraja,
+    darajaFor,
     log,
     onFinal,
   }: {
     db: Database;
-    daraja: DarajaClient;
+    /** Each payment is queried with the credentials it was created with. */
+    darajaFor: (credentialsId: string | null) => Promise<DarajaClient>;
     log: FastifyBaseLogger;
     onFinal: (payment: Payment) => Promise<void>;
   },
@@ -51,6 +52,7 @@ export const reconcilePendingPayments = async (
     .select({
       id: payments.id,
       checkoutRequestId: payments.checkoutRequestId,
+      mpesaCredentialsId: payments.mpesaCredentialsId,
     })
     .from(payments)
     .where(
@@ -81,9 +83,10 @@ export const reconcilePendingPayments = async (
       .set({ updatedAt: sql`now()` })
       .where(and(eq(payments.id, paymentId), eq(payments.status, "PENDING")));
 
-  for (const { id, checkoutRequestId } of stale) {
+  for (const { id, checkoutRequestId, mpesaCredentialsId } of stale) {
     const paymentLog = log.child({ paymentId: id });
     try {
+      const daraja = await darajaFor(mpesaCredentialsId);
       const result = await daraja.stkQuery(checkoutRequestId!);
       if (result.status === "pending") {
         summary.stillPending += 1;
