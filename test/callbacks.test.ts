@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Writable } from "node:stream";
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -465,5 +466,60 @@ describe("M-Pesa callbacks", () => {
       expect(allowed.statusCode).toBe(200);
       expect((await paymentRow(id)).status).toBe("SUCCEEDED");
     });
+  });
+});
+
+describe("callback logging", () => {
+  it("never writes a callback token to the logs", async () => {
+    const lines: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        lines.push(chunk.toString());
+        callback();
+      },
+    });
+    const daraja = await startFakeDaraja();
+    daraja.on(STK_PUSH_PATH, acceptPushes);
+    const app = await buildTestApp(
+      { LOG_LEVEL: "info" },
+      { darajaBaseUrl: daraja.baseUrl, logStream },
+    );
+    try {
+      const { authorization } = await merchantWithApiKey(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/v1/payments",
+        headers: { authorization, "idempotency-key": randomUUID() },
+        payload: {
+          phone: "0712345678",
+          amount: AMOUNT,
+          reference: "INV-1",
+          description: "Order 1",
+        },
+      });
+      const { checkout_request_id: checkoutRequestId } = created.json<{
+        checkout_request_id: string;
+      }>();
+      const callbackUrl = new URL(
+        (daraja.to(STK_PUSH_PATH).at(-1)!.body as { CallBackURL: string })
+          .CallBackURL,
+      );
+      const token = callbackUrl.pathname.split("/").pop()!;
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/v1/callbacks/mpesa/${token}?attempt=1`,
+        payload: successCallback(checkoutRequestId),
+      });
+      expect(res.statusCode).toBe(200);
+
+      const logs = lines.join("");
+      expect(logs).not.toContain(token);
+      // The request is still logged, just without its token.
+      expect(logs).toContain("/v1/callbacks/mpesa/[REDACTED]?attempt=1");
+    } finally {
+      await app.close();
+      await daraja.close();
+    }
   });
 });
